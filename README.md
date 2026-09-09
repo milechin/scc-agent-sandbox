@@ -53,27 +53,27 @@ live in RAM and vanish at exit. Two consequences: anything an agent writes to `$
 failure, so `--workdir` puts the session directories on real disk; and an agent
 binary living under `$HOME` disappears, so it must be bound back in.
 
-## The target version does not exist, at any level
-
-Blinding is applied so the version looks like it was never installed, rather than
-installed-and-broken. Three layers, all asserted by the gate:
+## What blinding looks like from inside
 
 ```
-ls /share/pkg.7/fftw/      ->  2.1.5_intel-2018_openmpi-3.1.1     (no 3.3.8 entry)
-[ -e .../fftw/3.3.8 ]      ->  false
-module avail fftw          ->  ...                                (3.3.8 absent)
-module load fftw/3.3.8     ->  "The following module(s) are unknown"
+ls /share/pkg.7/fftw/          ->  2.1.5_intel-2018_openmpi-3.1.1  3.3.8
+ls -A /share/pkg.7/fftw/3.3.8  ->  (empty)
+cat .../3.3.8/notes.txt        ->  No such file or directory
+module avail fftw              ->  3.3.8 absent
+module load fftw/3.3.8         ->  "The following module(s) are unknown"
 ```
 
-Masking only the *contents* is not enough: an empty `<pkg>/<ver>/` still appears in the
-parent listing, and an agent reasonably reads that as a half-finished or corrupted
-install and starts investigating — the same phantom the Lmod cache creates, in a
-different place. A directory entry can only be hidden by replacing its **parent**, so
-`<pkg>/` is masked and each sibling version is bound back individually. Sibling
-contents are unaffected, because bind sources resolve on the host.
+The version **directory entry stays visible** while its contents are gone. Hiding the
+entry as well is possible — mask `<pkg>/` and bind each sibling version back — and it
+was built and working, then reverted on purpose: it costs one bind per sibling (47
+instead of 26 for the worst package in the corpus) and adds a second code path, to
+save an agent from glancing at an empty directory. An empty directory is
+self-explanatory; the extra machinery was not worth it.
 
-`SANDBOX_KEEP_VERSION_DIR=1` falls back to masking only the contents, for a case where
-the directory must exist — an agent told to install *into* it, say.
+Note the asymmetry that makes this work: the module system says the version does
+**not exist** (the modulefile is a symlink into the masked directory, so Lmod skips
+it), while the filesystem shows an empty directory. An agent asking "is it installed?"
+through the normal route — `module avail` — gets a clean no.
 
 ## Masking hides the module too — if the Lmod cache is off
 

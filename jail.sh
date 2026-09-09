@@ -170,36 +170,21 @@ build_sandbox_args() {
     SANDBOX_ARGS+=( --bind "$d:$1:ro" )
   }
 
-  # Hide the VERSION DIRECTORY ITSELF, not just its contents. Masking the target with
-  # an empty directory leaves the name visible:
+  # Mask the target's CONTENTS. The directory entry itself stays visible:
   #
   #     ls /share/pkg.7/fftw/   ->   2.1.5_intel-2018_openmpi-3.1.1   3.3.8
   #
-  # An agent reasonably reads an empty <pkg>/<ver>/ as a half-finished or corrupted
-  # install and starts investigating -- the same phantom the Lmod cache created, in a
-  # different place. The truthful state for a version it is about to build is that the
-  # directory does not exist.
-  #
-  # A directory entry can only be hidden by replacing its PARENT, so: mask <pkg>/ with
-  # an empty dir, then bind each sibling version back individually. Sources resolve on
-  # the host, so the siblings' real content is unaffected by the parent mask, and
-  # Singularity materialises each mount point inside the (mode 755) mask source.
-  #
-  # SANDBOX_KEEP_VERSION_DIR=1 falls back to masking only the contents, for a case
-  # where the directory needs to exist -- e.g. an agent told to install INTO it.
+  # Hiding the entry too is possible -- mask <pkg>/ and bind each sibling version back
+  # individually -- and it was implemented and working. It was reverted deliberately:
+  # it costs one extra bind per sibling (47 binds instead of 26 for the worst package
+  # in the corpus) and adds a second code path, to prevent an agent from investigating
+  # an empty directory. An empty directory is self-explanatory enough that the trade
+  # was not worth the complexity.
   if [ -d "$pkg_root/$pkg/$ver" ]; then
+    _mask "$pkg_root/$pkg/$ver"
     SANDBOX_BLINDED=1
-    if [ -n "${SANDBOX_KEEP_VERSION_DIR:-}" ]; then
-      _mask "$pkg_root/$pkg/$ver"
-    else
-      _mask "$pkg_root/$pkg"
-      local sib
-      while IFS= read -r sib; do
-        [ -n "$sib" ] && [ "$sib" != "$ver" ] && \
-          SANDBOX_ARGS+=( --bind "$pkg_root/$pkg/$sib:$pkg_root/$pkg/$sib:ro" )
-      done < <(ls -A "$pkg_root/$pkg" 2>/dev/null)
-    fi
   fi
+
   # Mask THIS HARNESS. The site bind list contains /projectnb, /usr1, /project and
   # friends, so if the harness lives under any of them -- it does, in the repo it was
   # written in -- the whole directory is swept into the container read-only. That
