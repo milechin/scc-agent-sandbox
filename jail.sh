@@ -62,7 +62,16 @@ build_sandbox_args() {
   # -e      clean environment (the wrapper does this too)
   # --contain  empty $HOME and /tmp instead of the host's
   # --workdir  put those session dirs on real disk rather than a 64 MB tmpfs
-  SANDBOX_ARGS=( singularity exec -e --contain --workdir "$out/workdir" )
+  # -s is a GLOBAL flag and must precede the subcommand. "only print errors": it drops
+  # the INFO lines about nested bind targets AND the WARNING that the private home bind
+  # overrides --workdir's home. Both fire on every single run by construction -- we
+  # deliberately override that home -- so they are noise that trains a reader to ignore
+  # output. -q was not enough; it suppresses INFO but keeps WARNING.
+  #
+  # Verified that a genuine failure still prints under -s: a bad image path gives the
+  # same FATAL as without it. SANDBOX_VERBOSE=1 restores everything for diagnosis.
+  local quiet=( -s ); [ -n "${SANDBOX_VERBOSE:-}" ] && quiet=()
+  SANDBOX_ARGS=( singularity "${quiet[@]}" exec -e --contain --workdir "$out/workdir" )
 
   # Re-inject only what a build genuinely needs, the way scc-singularity does.
   # LMOD_IGNORE_CACHE matters here beyond performance: a cached Lmod scan still
@@ -192,7 +201,7 @@ build_sandbox_args() {
 # distinguish a working mask from an unnecessary one.
 build_sandbox_args_misordered() {
   local image=$1 pkg_root=$2 pkg=$3 ver=$4 work=$5 out=$6 emptydir=$7
-  MISORDERED_ARGS=( singularity exec -e --contain --workdir "$out/workdir"
+  MISORDERED_ARGS=( singularity -s exec -e --contain --workdir "$out/workdir"
                     --bind "$emptydir:$pkg_root/$pkg/$ver:ro" )
   local d
   for d in "${SANDBOX_RO_DIRS[@]}"; do

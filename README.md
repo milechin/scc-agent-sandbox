@@ -158,6 +158,13 @@ Verified inside: `~/.claude/skills` → the skill, `~/.claude/agents` → the su
 `~/.claude/references` → 9 files, all read-only — while `~/.claude` itself stays
 **writable**, so the agent can still write its own state alongside them.
 
+**Output noise.** Singularity is run with `-s` (errors only). Two messages otherwise
+fire on *every* run by construction — `INFO: Creating empty target directory for
+nested bind` and `WARNING: path ... is already overridden`, the latter because the
+private home deliberately overrides `--workdir`'s home. Suppressing them keeps a real
+failure visible instead of buried; a genuine `FATAL` still prints under `-s`, verified.
+Set `SANDBOX_VERBOSE=1` to get everything back when diagnosing.
+
 `SANDBOX_RO_BINDS` is a **string**, one `src:dst` per line, not an array — bash arrays
 cannot be exported, so an array set in your shell silently never reaches the script and
 the binds vanish with no error.

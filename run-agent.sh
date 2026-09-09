@@ -87,11 +87,11 @@ if [ "$SHELL_MODE" = 1 ]; then
    image      $(basename "$IMAGE")
    blinded    $PKG_ROOT/$PKG/$VER $([ "$SANDBOX_BLINDED" = 1 ] && echo "(masked, 0 entries)" || echo "(NOT present — nothing masked)")
    workspace  $WORK            <- the only writable path
-   capture    $OUT/home        <- bound at ${SANDBOX_CAPTURE_AT:-<unset>}
+   state      $OUT/homedir     <- \$HOME inside; anything the agent writes there survives$([ -n "${SANDBOX_CAPTURE_AT:-}" ] && printf '\n   capture    %s <- bound at %s' "$OUT/home" "$SANDBOX_CAPTURE_AT")
    read-only  /share, /usr/local, and the rest of the site bind list
 
-   Everything outside the workspace is read-only. Type 'exit' to leave; the results
-   directory and anything under capture/ survive.
+   Everything outside the workspace is read-only. Type 'exit' to leave; the workspace
+   and state directories above survive.
   ───────────────────────────────────────────────────────────────────────────────
 
 BANNER
@@ -123,5 +123,6 @@ echo
 echo "== run complete (rc=$rc)"
 echo "   results: $OUT"
 [ "$SHELL_MODE" = 1 ] || echo "   stdout:  $OUT/agent.stdout"
-echo "   capture: $OUT/home  (whatever the agent wrote to \$SANDBOX_CAPTURE_AT)"
+echo "   state:   $OUT/homedir  (\$HOME inside the container)"
+[ -n "${SANDBOX_CAPTURE_AT:-}" ] && echo "   capture: $OUT/home  (bound at $SANDBOX_CAPTURE_AT)"
 exit $rc
