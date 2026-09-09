@@ -63,6 +63,8 @@ out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   mkdir -p '"$PKG_ROOT"'/.probe 2>/dev/null && { t pkgroot rw; rmdir '"$PKG_ROOT"'/.probe; } || t pkgroot ro
   touch "'"$WORK"'/.probe" 2>/dev/null && { t work rw; rm -f "'"$WORK"'/.probe"; } || t work ro
   t blinded "$(ls -A "'"$PKG_ROOT"'/'"$PKG"'/'"$VER"'" 2>/dev/null | wc -l)"
+  t verexists "$([ -e "'"$PKG_ROOT"'/'"$PKG"'/'"$VER"'" ] && echo yes || echo no)"
+  t verlisted "$(ls -A "'"$PKG_ROOT"'/'"$PKG"'" 2>/dev/null | grep -cx "'"$VER"'")"
   t prior "$(ls -A "'"$PKG_ROOT"'/'"$PKG"'/'"$PRIOR_VER"'" 2>/dev/null | wc -l)"
   t modulecmd "$(type -t module || echo none)"
   t listed "$(module avail '"$PKG"' 2>&1 | grep -c "'"$PKG"'/'"$VER"'\b")"
@@ -88,6 +90,13 @@ check "workspace is writable"             rw       "$(g work)"
 echo "  --- blinding ---"
 if [ "$SANDBOX_BLINDED" = 1 ]; then
   check "target $PKG/$VER shows 0 entries" 0       "$(g blinded)"
+  # Masking only the CONTENTS leaves the directory name in the parent listing, and an
+  # empty <pkg>/<ver>/ reads as a half-finished install worth investigating. Unless the
+  # case asks to keep it, the entry itself should be absent.
+  if [ -z "${SANDBOX_KEEP_VERSION_DIR:-}" ]; then
+    check "version dir does not exist"      no      "$(g verexists)"
+    check "version not listed in $PKG/"     0       "$(g verlisted)"
+  fi
   # Absent, not merely broken. A cached Lmod scan still lists the masked version and
   # fails with "Unable to load module because of error" -- which is the state that
   # sends an agent troubleshooting a module that was never supposed to exist.

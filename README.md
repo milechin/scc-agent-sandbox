@@ -53,6 +53,28 @@ live in RAM and vanish at exit. Two consequences: anything an agent writes to `$
 failure, so `--workdir` puts the session directories on real disk; and an agent
 binary living under `$HOME` disappears, so it must be bound back in.
 
+## The target version does not exist, at any level
+
+Blinding is applied so the version looks like it was never installed, rather than
+installed-and-broken. Three layers, all asserted by the gate:
+
+```
+ls /share/pkg.7/fftw/      ->  2.1.5_intel-2018_openmpi-3.1.1     (no 3.3.8 entry)
+[ -e .../fftw/3.3.8 ]      ->  false
+module avail fftw          ->  ...                                (3.3.8 absent)
+module load fftw/3.3.8     ->  "The following module(s) are unknown"
+```
+
+Masking only the *contents* is not enough: an empty `<pkg>/<ver>/` still appears in the
+parent listing, and an agent reasonably reads that as a half-finished or corrupted
+install and starts investigating — the same phantom the Lmod cache creates, in a
+different place. A directory entry can only be hidden by replacing its **parent**, so
+`<pkg>/` is masked and each sibling version is bound back individually. Sibling
+contents are unaffected, because bind sources resolve on the host.
+
+`SANDBOX_KEEP_VERSION_DIR=1` falls back to masking only the contents, for a case where
+the directory must exist — an agent told to install *into* it, say.
+
 ## Masking hides the module too — if the Lmod cache is off
 
 Published modulefiles are **symlinks into the package directory**
