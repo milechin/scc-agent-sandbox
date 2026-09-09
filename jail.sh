@@ -121,6 +121,28 @@ build_sandbox_args() {
   [ -n "${SANDBOX_CAPTURE_AT:-}" ] && [ -d "$out/home" ] && \
     SANDBOX_ARGS+=( --bind "$out/home:$SANDBOX_CAPTURE_AT" )
 
+  # Extra read-only binds, "src:dst" per entry, applied AFTER the private home so they
+  # can land inside it. The reason this exists: an agent's instructions usually live in
+  # a project directory, and discovering them means starting the agent with that
+  # directory as cwd -- but every repo path here is read-only, so the agent would be
+  # working somewhere it cannot write. Mounting the instructions into the private home
+  # instead makes them available from ANY cwd, leaving the writable workspace free to
+  # be the working directory. For a Claude Code-style agent:
+  #
+  #   SANDBOX_RO_BINDS="$REPO/.claude/skills:$HOME/.claude/skills
+  # $REPO/.claude/agents:$HOME/.claude/agents
+  # $REPO/.claude/references:$HOME/.claude/references"
+  #
+  # $HOME/.claude itself stays writable, so the agent can still write its own state.
+  # A STRING, one "src:dst" per line -- not an array. Bash arrays cannot be exported,
+  # so an array set in the caller's shell silently never reaches this script and the
+  # binds vanish with no error. Measured the hard way.
+  local rb
+  while IFS= read -r rb; do
+    [ -n "$rb" ] || continue
+    [ -e "${rb%%:*}" ] && SANDBOX_ARGS+=( --bind "$rb:ro" )
+  done <<< "${SANDBOX_RO_BINDS:-}"
+
   # ---- 7. MASKS, LAST ---------------------------------------------------------
   # Everything above this line is visible; everything here is hidden. Appending in
   # this order is the entire blinding guarantee -- see the header.

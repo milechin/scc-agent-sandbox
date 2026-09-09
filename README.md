@@ -126,6 +126,42 @@ top of* `--contain`'s tmpfs and the real home reappears — measured at 209 entr
 dirs fixes both. `verify-sandbox.sh` checks for this explicitly (`$HOME is writable`,
 `$HOME is NOT the real home`), because it is a silent regression otherwise.
 
+### Where do the skills come from? (cwd matters)
+
+The shell starts in `$HOME` — the private per-run home — **not** in your repo. So an
+agent that discovers instructions from its working directory will find none until you
+`cd`. Two ways to handle it, and the second is usually better:
+
+**Project scope — `cd` to the repo.** Works, and needs no setup:
+
+```bash
+cd /path/to/your/repo      # .claude/skills is readable here
+claude
+```
+
+The catch: **every repo path is read-only inside the jail**, so the agent is working
+in a directory it cannot write to. Fine for a read-only exercise, awkward for a real
+install.
+
+**User scope — mount the instructions into the private home.** Then they are found
+from *any* cwd, and the agent can work in the writable workspace:
+
+```bash
+R=/path/to/your/repo
+export SANDBOX_RO_BINDS="$R/.claude/skills:$HOME/.claude/skills
+$R/.claude/agents:$HOME/.claude/agents
+$R/.claude/references:$HOME/.claude/references"
+./run-agent.sh cases/fftw-3.3.8.env --shell
+```
+
+Verified inside: `~/.claude/skills` → the skill, `~/.claude/agents` → the sub-agent,
+`~/.claude/references` → 9 files, all read-only — while `~/.claude` itself stays
+**writable**, so the agent can still write its own state alongside them.
+
+`SANDBOX_RO_BINDS` is a **string**, one `src:dst` per line, not an array — bash arrays
+cannot be exported, so an array set in your shell silently never reaches the script and
+the binds vanish with no error.
+
 **Getting the agent on `PATH`:** binding it in is not enough — `-e` gives the container
 its own `PATH`, so a binary under `~/.local/bin` is present but "command not found".
 Setting `SANDBOX_AGENT_DIR` handles it: if it has a `bin/`, that goes on `PATH` via
