@@ -74,15 +74,73 @@ error` — the confusing case. `--contain` avoids it by giving the container no 
 cache, and `LMOD_IGNORE_CACHE=yes` is injected as a belt-and-braces second guard.
 `verify-sandbox.sh` asserts *absent*, not merely *broken*.
 
-## Running an agent that lives under `$HOME`
+## Interactive: drive an agent by hand
+
+`--shell` drops you at a prompt **inside the verified jail** — same mounts, same
+blinding, same gate as a scripted run. Use it to run an exercise step by step, steer
+as you go, or try a new agent before writing a case for it.
 
 ```bash
-export SANDBOX_AGENT_DIR=$HOME/.local/share/claude   # bound read-only so it exists inside
-export SANDBOX_CAPTURE_AT=$HOME/.claude              # redirected to $OUT/home so state survives
-./run-agent.sh cases/fftw-3.3.8.env --agent-cmd 'claude -p "..."'
+cd agent-sandbox
+export SANDBOX_AGENT_DIR=$HOME/.local          # bound read-only; its bin/ goes on PATH
+./run-agent.sh cases/fftw-3.3.8.env --shell
 ```
 
-Both are optional. An agent that needs neither still runs.
+You get a banner naming the workspace, the capture directory and what is masked, then
+a normal shell:
+
+```
+  ── sandbox shell ─────────────────────────────────────────────
+   image      scc-centos7-2023-06-01.simg
+   blinded    /share/pkg.7/fftw/3.3.8 (masked, 0 entries)
+   workspace  .../work            <- the only writable path
+```
+
+A worked exercise, all verified to run in the pilot image:
+
+```bash
+cat /etc/redhat-release          # CentOS Linux release 7.9.2009 — you are inside
+claude --version                 # 2.1.233 (Claude Code)
+
+module avail fftw                # 2.1.5_intel-2018_openmpi-3.1.1 — 3.3.8 is ABSENT
+module load fftw/3.3.8           # "The following module(s) are unknown"
+ls -A /share/pkg.7/fftw/3.3.8    # empty: the mask
+ls /share/pkg.7/fftw/2.1.5*      # prior art still readable
+
+touch /share/pkg.7/probe         # Read-only file system
+cd "$WORKSPACE_OR_YOUR_WORK_DIR" # the only writable path (printed in the banner)
+
+claude                           # drive it interactively from here
+exit                             # results and captured state survive
+```
+
+**What persists.** `$HOME` is a private per-run directory (`$OUT/homedir`) bound over
+the real one, so anything the agent writes to `~/.claude`, `~/.config` or a dotfile is
+there afterwards — no extra plumbing. The workspace and `$OUT` survive too. Nothing
+you do inside can touch the real home or `/share`.
+
+**Why a private `$HOME` and not just `--contain`:** the site bind list includes
+`/usr1`…`/usr4`, and home lives under one of them, so that read-only bind lands *on
+top of* `--contain`'s tmpfs and the real home reappears — measured at 209 entries with
+`~/.claude` readable and `$HOME` not writable. Binding a per-run home after the site
+dirs fixes both. `verify-sandbox.sh` checks for this explicitly (`$HOME is writable`,
+`$HOME is NOT the real home`), because it is a silent regression otherwise.
+
+**Getting the agent on `PATH`:** binding it in is not enough — `-e` gives the container
+its own `PATH`, so a binary under `~/.local/bin` is present but "command not found".
+Setting `SANDBOX_AGENT_DIR` handles it: if it has a `bin/`, that goes on `PATH` via
+`SINGULARITYENV_PREPEND_PATH`. Otherwise just call the binary by absolute path.
+
+## Scripted: one command, captured
+
+```bash
+export SANDBOX_AGENT_DIR=$HOME/.local
+./run-agent.sh cases/fftw-3.3.8.env --agent-cmd 'claude -p "install fftw 3.3.8"'
+```
+
+Output lands in `$OUT/agent.stdout` / `agent.stderr`, with `run.meta` and `argv.txt`
+recording exactly what ran. `SANDBOX_CAPTURE_AT` is only needed for an agent whose
+state directory is *not* under `$HOME`; state under `$HOME` already persists.
 
 ## Case files
 

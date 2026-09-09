@@ -80,24 +80,45 @@ build_sandbox_args() {
   [ -f /var/lib/dbus/machine-id ] && \
     SANDBOX_ARGS+=( --bind /var/lib/dbus/machine-id:/var/lib/dbus/machine-id:ro )
 
-  # ---- 3. writable workspace --------------------------------------------------
+  # ---- 3. a private HOME, bound back OVER the read-only site dirs -------------
+  # --contain alone is not enough. Home lives under /usr1 (or /usr2../usr4), which is
+  # in the site bind list above, so that read-only bind lands on top of the contained
+  # tmpfs and the REAL home reappears: measured at 209 entries with ~/.claude readable
+  # and $HOME not writable. That defeats the isolation entirely -- an agent under test
+  # could read every other project's transcripts -- and breaks agents that write
+  # dotfiles.
+  #
+  # Binding a per-run directory over $HOME after the site dirs fixes both, because
+  # later binds win. It also means the agent's own state (~/.claude and friends)
+  # lands in $out/homedir and survives the container with no extra plumbing.
+  SANDBOX_ARGS+=( --bind "$out/homedir:$HOME" )
+
+  # ---- 4. writable workspace --------------------------------------------------
   # The one place the agent may write. Bound AFTER the read-only dirs so it wins if
   # it happens to live under one of them (a workspace under /projectnb is normal).
   SANDBOX_ARGS+=( --bind "$work:$work" )
 
-  # ---- 4. scratch -------------------------------------------------------------
+  # ---- 5. scratch -------------------------------------------------------------
   [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ] && SANDBOX_ARGS+=( --bind "$TMPDIR:$TMPDIR" )
 
-  # ---- 5. agent runtime + capture --------------------------------------------
+  # ---- 6. agent runtime + capture --------------------------------------------
   # Set by the caller: what to bind so the agent binary exists inside, and where its
   # state should land so it survives the container. Both optional -- an agent that
   # needs neither still works.
-  [ -n "${SANDBOX_AGENT_DIR:-}" ] && [ -d "$SANDBOX_AGENT_DIR" ] && \
+  if [ -n "${SANDBOX_AGENT_DIR:-}" ] && [ -d "$SANDBOX_AGENT_DIR" ]; then
     SANDBOX_ARGS+=( --bind "$SANDBOX_AGENT_DIR:$SANDBOX_AGENT_DIR:ro" )
+    # Binding the agent in is not enough to make it runnable: `-e` gives the container
+    # its own PATH, so a binary under $HOME/.local/bin is present but "command not
+    # found". Prepend its bin/ if there is one.
+    [ -d "$SANDBOX_AGENT_DIR/bin" ] && \
+      SANDBOX_ENV+=( "SINGULARITYENV_PREPEND_PATH=$SANDBOX_AGENT_DIR/bin" )
+  fi
+  # Optional: only needed when an agent's state dir is NOT under $HOME. State that
+  # does live under $HOME already persists, because $HOME is now $out/homedir.
   [ -n "${SANDBOX_CAPTURE_AT:-}" ] && [ -d "$out/home" ] && \
     SANDBOX_ARGS+=( --bind "$out/home:$SANDBOX_CAPTURE_AT" )
 
-  # ---- 6. MASKS, LAST ---------------------------------------------------------
+  # ---- 7. MASKS, LAST ---------------------------------------------------------
   # Everything above this line is visible; everything here is hidden. Appending in
   # this order is the entire blinding guarantee -- see the header.
   if [ -d "$pkg_root/$pkg/$ver" ]; then
@@ -125,5 +146,6 @@ build_sandbox_args_misordered() {
   for d in "${SANDBOX_RO_DIRS[@]}"; do
     [ -d "$d" ] && MISORDERED_ARGS+=( --bind "$d:$d:ro" )
   done
-  MISORDERED_ARGS+=( "$image" )
+  # Same private home as the real argv, so this variant differs ONLY in mask order.
+  MISORDERED_ARGS+=( --bind "$out/homedir:$HOME" "$image" )
 }

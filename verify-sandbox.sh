@@ -30,7 +30,7 @@ BLIND_PATHS=("${BLIND_PATHS[@]:-}")
 
 ROOT=${SANDBOX_ROOT:-${TMPDIR:-/tmp}/agent-sandbox-verify.$$}
 WORK="$ROOT/work"; OUT="$ROOT/out"
-mkdir -p "$WORK" "$OUT/workdir" "$OUT/home" || exit 1
+mkdir -p "$WORK" "$OUT/workdir" "$OUT/home" "$OUT/homedir" || exit 1
 EMPTY="$ROOT/empty"; mkdir -p "$EMPTY"; chmod 555 "$EMPTY"
 trap 'chmod 755 "$EMPTY" 2>/dev/null; rm -rf "$ROOT"' EXIT
 
@@ -60,6 +60,8 @@ out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   t listed "$(module avail '"$PKG"' 2>&1 | grep -c "'"$PKG"'/'"$VER"'\b")"
   t loaderr "$(module load '"$PKG"'/'"$VER"' 2>&1 | grep -qi "unknown" && echo unknown || echo other)"
   t homefs "$(findmnt -no FSTYPE "$HOME" 2>/dev/null || echo unknown)"
+  touch "$HOME/.probe" 2>/dev/null && { t homerw rw; rm -f "$HOME/.probe"; } || t homerw ro
+  t homecount "$(ls -A "$HOME" 2>/dev/null | wc -l)"
   getent hosts github.com >/dev/null 2>&1 && t dns ok || t dns down
 ' 2>&1)
 
@@ -89,6 +91,18 @@ if [ -n "$PRIOR_VER" ]; then
   else
     printf '  FAIL  %-46s unreadable\n' "prior version $PRIOR_VER readable"; fail=$((fail+1))
   fi
+fi
+
+echo "  --- home isolation ---"
+# The site bind list contains /usr1../usr4, and $HOME lives under one of them, so a
+# read-only site bind lands ON TOP of --contain's tmpfs and the real home reappears --
+# measured at 209 entries, ~/.claude readable, $HOME not writable. A private home bound
+# after the site dirs fixes it. These two checks are what catch a regression.
+check "\$HOME is writable"                 rw       "$(g homerw)"
+if [ "$(g homecount)" -le 4 ] 2>/dev/null; then
+  printf '  ok    %-46s %s entries (isolated)\n' "\$HOME is NOT the real home" "$(g homecount)"; pass=$((pass+1))
+else
+  printf '  FAIL  %-46s %s entries — the real home is exposed\n' "\$HOME is NOT the real home" "$(g homecount)"; fail=$((fail+1))
 fi
 
 echo "  --- session storage ---"
