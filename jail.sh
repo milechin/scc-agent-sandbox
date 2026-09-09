@@ -155,8 +155,23 @@ build_sandbox_args() {
   # ---- 7. MASKS, LAST ---------------------------------------------------------
   # Everything above this line is visible; everything here is hidden. Appending in
   # this order is the entire blinding guarantee -- see the header.
+  #
+  # EACH MASK GETS ITS OWN DIRECTORY. Sharing one "empty" source across masks leaks:
+  # when a later bind lands inside a masked path (the run directory restored over the
+  # masked harness, below), Singularity materialises that mount point INSIDE the mask
+  # source -- so the shared directory stops being empty and every other mask shows the
+  # stray entry. Observed exactly that: `ls -A /share/pkg.7/fftw/3.3.8` inside the
+  # container returned "results".
+  local _mask_n=0
+  _mask() {                       # _mask <path-to-hide>
+    _mask_n=$((_mask_n+1))
+    local d="$emptydir/m$_mask_n"
+    mkdir -p "$d" || return 1
+    SANDBOX_ARGS+=( --bind "$d:$1:ro" )
+  }
+
   if [ -d "$pkg_root/$pkg/$ver" ]; then
-    SANDBOX_ARGS+=( --bind "$emptydir:$pkg_root/$pkg/$ver:ro" )
+    _mask "$pkg_root/$pkg/$ver"
     SANDBOX_BLINDED=1
   fi
   # Mask THIS HARNESS. The site bind list contains /projectnb, /usr1, /project and
@@ -169,7 +184,7 @@ build_sandbox_args() {
   # Self-protecting rather than per-case: the harness always knows where it is, and a
   # BLIND_PATHS entry someone forgets to add is exactly the failure this prevents.
   if [ -n "${SANDBOX_SELF_DIR:-}" ] && [ -d "$SANDBOX_SELF_DIR" ]; then
-    SANDBOX_ARGS+=( --bind "$emptydir:$SANDBOX_SELF_DIR:ro" )
+    _mask "$SANDBOX_SELF_DIR"
     # ...but the run's own output usually lives UNDER the harness (results/<stamp>/),
     # and the workspace lives under that. Masking the harness would therefore hide the
     # one writable path the agent has. Bind this run's directory back afterwards --
@@ -189,7 +204,7 @@ build_sandbox_args() {
   local b
   for b in "${extra_blind[@]}"; do
     # Masking a nonexistent path is a hard error, not a no-op.
-    [ -e "$b" ] && SANDBOX_ARGS+=( --bind "$emptydir:$b:ro" )
+    [ -e "$b" ] && _mask "$b"
   done
 
   SANDBOX_ARGS+=( "$image" )

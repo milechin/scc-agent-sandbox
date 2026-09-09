@@ -28,8 +28,16 @@ BLIND_PATHS=("${BLIND_PATHS[@]:-}")
 
 [ -f "$IMAGE" ] || { echo "image not found: $IMAGE" >&2; exit 2; }
 
-ROOT=${SANDBOX_ROOT:-${TMPDIR:-/tmp}/agent-sandbox-verify.$$}
-WORK="$ROOT/work"; OUT="$ROOT/out"
+# Verify in the SAME layout a real run uses: $OUT under the harness directory, which
+# is where run-agent.sh puts it by default. With $OUT in $TMPDIR instead, the harness
+# mask never has the run directory bound back inside it, so the nested-mount-point
+# behaviour that leaked into the target mask is never exercised and the gate passes
+# while real runs leak. Checking a configuration nobody runs is how that got missed.
+ROOT=${SANDBOX_ROOT:-$HERE/.verify.$$}
+# WORK lives INSIDE OUT, exactly as run-agent.sh defaults it. As a sibling it sits
+# under the masked harness with only OUT restored, so the workspace comes back
+# read-only -- which the gate correctly failed on when the layout was first aligned.
+OUT="$ROOT/out"; WORK="$OUT/work"
 mkdir -p "$WORK" "$OUT/workdir" "$OUT/home" "$OUT/homedir" || exit 1
 EMPTY=$(mktemp -d "${TMPDIR:-/tmp}/agent-sandbox-mask.XXXXXX") || exit 1
 trap 'rm -rf "$EMPTY" "$ROOT"' EXIT

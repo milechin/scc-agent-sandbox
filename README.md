@@ -210,10 +210,15 @@ Two layers handle it:
    The run's own output directory is bound back afterwards when it lives under the
    harness (the default, `results/<case>-<stamp>/`), so the agent sees its own run and
    nothing else — no `cases/*.env`, no earlier results. Two constraints follow, and
-   getting either wrong is a hard failure rather than a quiet one: the mask source
+   getting any of them wrong is a failure, and only the first is loud: the mask source
    must be **mode 755**, because Singularity materialises the nested mount point
-   inside it before mounting (`mkdirat: permission denied` otherwise), and it must
-   live **outside** the masked tree, or it is a mount loop.
+   inside it before mounting (`mkdirat: permission denied` otherwise); it must live
+   **outside** the masked tree, or it is a mount loop; and **each mask needs its own
+   directory**. That last one is the quiet failure: with a single shared "empty"
+   source, materialising the run directory's mount point inside it leaves `results/`
+   there, and every *other* mask using the same source then shows that entry — so
+   `ls -A /share/pkg.7/fftw/3.3.8` returned `results` while the gate reported the
+   target blinded.
 
 2. **Anything else is the case author's job**, via `BLIND_PATHS`. The prototype
    cannot know about a second harness, a notes archive or a scratch copy of the
