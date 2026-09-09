@@ -200,6 +200,14 @@ Two layers handle it:
    (the directory it lives in), so `cases/` and `results/` are always empty inside.
    Self-protecting on purpose — a `BLIND_PATHS` entry someone forgets to add is
    exactly the failure this prevents. `verify-sandbox.sh` asserts it.
+   The run's own output directory is bound back afterwards when it lives under the
+   harness (the default, `results/<case>-<stamp>/`), so the agent sees its own run and
+   nothing else — no `cases/*.env`, no earlier results. Two constraints follow, and
+   getting either wrong is a hard failure rather than a quiet one: the mask source
+   must be **mode 755**, because Singularity materialises the nested mount point
+   inside it before mounting (`mkdirat: permission denied` otherwise), and it must
+   live **outside** the masked tree, or it is a mount loop.
+
 2. **Anything else is the case author's job**, via `BLIND_PATHS`. The prototype
    cannot know about a second harness, a notes archive or a scratch copy of the
    answer and still be liftable into another repo. The pilot case masks

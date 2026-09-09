@@ -161,6 +161,20 @@ build_sandbox_args() {
   # BLIND_PATHS entry someone forgets to add is exactly the failure this prevents.
   if [ -n "${SANDBOX_SELF_DIR:-}" ] && [ -d "$SANDBOX_SELF_DIR" ]; then
     SANDBOX_ARGS+=( --bind "$emptydir:$SANDBOX_SELF_DIR:ro" )
+    # ...but the run's own output usually lives UNDER the harness (results/<stamp>/),
+    # and the workspace lives under that. Masking the harness would therefore hide the
+    # one writable path the agent has. Bind this run's directory back afterwards --
+    # later wins -- so the agent sees its own run and nothing else: no cases/*.env, no
+    # earlier results.
+    #
+    # This is also why $emptydir must be mode 755 and must NOT live under the masked
+    # tree: Singularity materialises the nested mount point inside the mask source
+    # before mounting, so a 555 directory fails with
+    #   FATAL: ... failed to create .../.empty/results directory: mkdirat: permission denied
+    # and a mask source inside its own target is a mount loop.
+    case "$out" in
+      "$SANDBOX_SELF_DIR"/*) SANDBOX_ARGS+=( --bind "$out:$out" ) ;;
+    esac
   fi
 
   local b

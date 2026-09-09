@@ -31,8 +31,8 @@ BLIND_PATHS=("${BLIND_PATHS[@]:-}")
 ROOT=${SANDBOX_ROOT:-${TMPDIR:-/tmp}/agent-sandbox-verify.$$}
 WORK="$ROOT/work"; OUT="$ROOT/out"
 mkdir -p "$WORK" "$OUT/workdir" "$OUT/home" "$OUT/homedir" || exit 1
-EMPTY="$ROOT/empty"; mkdir -p "$EMPTY"; chmod 555 "$EMPTY"
-trap 'chmod 755 "$EMPTY" 2>/dev/null; rm -rf "$ROOT"' EXIT
+EMPTY=$(mktemp -d "${TMPDIR:-/tmp}/agent-sandbox-mask.XXXXXX") || exit 1
+trap 'rm -rf "$EMPTY" "$ROOT"' EXIT
 
 pass=0 fail=0
 check() { # check <label> <expected> <actual>
@@ -62,7 +62,7 @@ out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   t homefs "$(findmnt -no FSTYPE "$HOME" 2>/dev/null || echo unknown)"
   touch "$HOME/.probe" 2>/dev/null && { t homerw rw; rm -f "$HOME/.probe"; } || t homerw ro
   t homecount "$(ls -A "$HOME" 2>/dev/null | wc -l)"
-  t harness "$(ls -A "'"$HERE"'" 2>/dev/null | wc -l)"
+  t harness "$(ls -A "'"$HERE"'/cases" 2>/dev/null | wc -l)"
   getent hosts github.com >/dev/null 2>&1 && t dns ok || t dns down
 ' 2>&1)
 
@@ -108,7 +108,10 @@ fi
 
 # The site binds sweep in whatever filesystem the harness lives on, so cases/*.env --
 # the answer key -- is readable unless the harness masks itself.
-check "harness masked (own dir empty)"     0        "$(g harness)"
+# cases/*.env is the answer key. Checked specifically rather than the whole harness
+# dir, because a run whose output lives under results/ has that one subdirectory bound
+# back -- the agent sees its own run and nothing else.
+check "answer keys masked (cases/ empty)" 0        "$(g harness)"
 
 echo "  --- session storage ---"
 # --contain alone gives a 64 MB tmpfs here; --workdir should move it to real disk.

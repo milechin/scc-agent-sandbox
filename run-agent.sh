@@ -49,7 +49,8 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 OUT=${OUT:-$HERE/results/$(basename "$CASE" .env)-$STAMP}
 WORK=${WORK:-$OUT/work}
 mkdir -p "$WORK" "$OUT/workdir" "$OUT/home" "$OUT/homedir" || exit 1
-EMPTY="$OUT/.empty"; mkdir -p "$EMPTY"; chmod 555 "$EMPTY"
+# Mask source: mode 755 and OUTSIDE the harness tree -- see jail.sh for why.
+EMPTY=$(mktemp -d "${TMPDIR:-/tmp}/agent-sandbox-mask.XXXXXX") || exit 1
 
 # GATE FIRST. A run against a broken jail is worse than no run: it can write to
 # production, or read the answer while the report calls it blinded.
@@ -117,7 +118,7 @@ if [ -n "${EXPECT_BIN:-}" ]; then
   fi
 fi
 
-chmod 755 "$EMPTY" 2>/dev/null; rmdir "$EMPTY" 2>/dev/null
+rm -rf "$EMPTY" 2>/dev/null
 echo
 echo "== run complete (rc=$rc)"
 echo "   results: $OUT"
