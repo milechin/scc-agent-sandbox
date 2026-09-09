@@ -36,6 +36,9 @@
 #     unrelated-looking failure, so --workdir puts the session dirs on real disk.
 # ---------------------------------------------------------------------------------
 
+# Where this harness lives, so it can mask itself -- see "Mask THIS HARNESS" below.
+SANDBOX_SELF_DIR="${SANDBOX_SELF_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+
 # The site's bind list, from `scc-singularity --scc-preview`. Only ones that exist
 # are bound; the wrapper does the same test.
 SANDBOX_RO_DIRS=(
@@ -125,6 +128,19 @@ build_sandbox_args() {
     SANDBOX_ARGS+=( --bind "$emptydir:$pkg_root/$pkg/$ver:ro" )
     SANDBOX_BLINDED=1
   fi
+  # Mask THIS HARNESS. The site bind list contains /projectnb, /usr1, /project and
+  # friends, so if the harness lives under any of them -- it does, in the repo it was
+  # written in -- the whole directory is swept into the container read-only. That
+  # includes cases/*.env, which names the blinded version and the prior version, and
+  # results/, which holds earlier transcripts for the same package. Blinding the
+  # package tree while leaving the answer key readable blinds nothing.
+  #
+  # Self-protecting rather than per-case: the harness always knows where it is, and a
+  # BLIND_PATHS entry someone forgets to add is exactly the failure this prevents.
+  if [ -n "${SANDBOX_SELF_DIR:-}" ] && [ -d "$SANDBOX_SELF_DIR" ]; then
+    SANDBOX_ARGS+=( --bind "$emptydir:$SANDBOX_SELF_DIR:ro" )
+  fi
+
   local b
   for b in "${extra_blind[@]}"; do
     # Masking a nonexistent path is a hard error, not a no-op.

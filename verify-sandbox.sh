@@ -62,6 +62,7 @@ out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   t homefs "$(findmnt -no FSTYPE "$HOME" 2>/dev/null || echo unknown)"
   touch "$HOME/.probe" 2>/dev/null && { t homerw rw; rm -f "$HOME/.probe"; } || t homerw ro
   t homecount "$(ls -A "$HOME" 2>/dev/null | wc -l)"
+  t harness "$(ls -A "'"$HERE"'" 2>/dev/null | wc -l)"
   getent hosts github.com >/dev/null 2>&1 && t dns ok || t dns down
 ' 2>&1)
 
@@ -104,6 +105,10 @@ if [ "$(g homecount)" -le 4 ] 2>/dev/null; then
 else
   printf '  FAIL  %-46s %s entries — the real home is exposed\n' "\$HOME is NOT the real home" "$(g homecount)"; fail=$((fail+1))
 fi
+
+# The site binds sweep in whatever filesystem the harness lives on, so cases/*.env --
+# the answer key -- is readable unless the harness masks itself.
+check "harness masked (own dir empty)"     0        "$(g harness)"
 
 echo "  --- session storage ---"
 # --contain alone gives a 64 MB tmpfs here; --workdir should move it to real disk.

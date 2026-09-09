@@ -142,6 +142,36 @@ Output lands in `$OUT/agent.stdout` / `agent.stderr`, with `run.meta` and `argv.
 recording exactly what ran. `SANDBOX_CAPTURE_AT` is only needed for an agent whose
 state directory is *not* under `$HOME`; state under `$HOME` already persists.
 
+## What the agent can see of your repo — and what it must not
+
+The site bind list includes `/projectnb`, `/usr1`, `/project` and friends, so **any
+repository living under one of them is swept into the container read-only**, whether
+or not you bind it. That is usually what you want: it is how an agent finds its own
+skill files and references.
+
+It is also how an answer key leaks. Measured before the fix, from inside the jail:
+
+```
+.claude/skills:  scc-install-from-source        <- wanted
+.claude/references: 9 files                     <- wanted
+agent-sandbox/cases/fftw-3.3.8.env              <- THE ANSWER KEY, readable
+tests/cases/*.env                               <- another harness's answer keys
+```
+
+Two layers handle it:
+
+1. **The harness masks itself automatically.** `jail.sh` masks `SANDBOX_SELF_DIR`
+   (the directory it lives in), so `cases/` and `results/` are always empty inside.
+   Self-protecting on purpose — a `BLIND_PATHS` entry someone forgets to add is
+   exactly the failure this prevents. `verify-sandbox.sh` asserts it.
+2. **Anything else is the case author's job**, via `BLIND_PATHS`. The prototype
+   cannot know about a second harness, a notes archive or a scratch copy of the
+   answer and still be liftable into another repo. The pilot case masks
+   `install_agent/tests` for this reason.
+
+After both: `tests/` and `agent-sandbox/` read as 0 entries, while `.claude/skills`
+and the references stay visible.
+
 ## Case files
 
 ```bash
