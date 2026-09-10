@@ -71,6 +71,15 @@ live token lands in a run directory; read-write so token refresh works, which is
 the only write path from the jail back into the real home. Measured: an in-place write
 to a bind-mounted file reaches the host, an atomic rename over it does not.
 
+`SANDBOX_HOME_COPIES` is the copy counterpart, for config the agent **rewrites**. The
+split is load-bearing and was found the hard way: binding only the credential still
+left interactive Claude Code at a login screen, because onboarding and folder-trust
+state live in `~/.claude.json`, not in `.credentials.json` — and `claude -p` skips
+both, so scripted runs looked fine. That file must be copied, not bound: it grew from
+1.3 KB to 42 KB during one short run, all of which a read-write bind would have
+written into the real config. `tools/claude-home.sh` builds a minimal seed and is
+deliberately outside the agent-agnostic core.
+
 `$OUT` defaults to `$PWD/results/<case>-<stamp>/`, not the clone: the harness is a
 mechanism, not a data store. The gate still verifies with `$OUT` under the harness
 directory on purpose — that is the nested layout where the run directory is restored

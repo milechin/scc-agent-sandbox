@@ -61,6 +61,33 @@ mkdir -p "$WORK" "$OUT/workdir" "$OUT/home" "$OUT/homedir" || exit 1
 # Mask source: mode 755 and OUTSIDE the harness tree -- see jail.sh for why.
 EMPTY=$(mktemp -d "${TMPDIR:-/tmp}/agent-sandbox-mask.XXXXXX") || exit 1
 
+# SANDBOX_HOME_COPIES: files COPIED into the private home before launch, "src:dst" per
+# line, dst relative to the private home. The counterpart to SANDBOX_HOME_FILES, which
+# binds -- and the difference matters:
+#
+#   bind  a credential. It stays in the real home, nothing is left in the run
+#         directory, and a refreshed token writes back through.
+#   copy  a config file the agent REWRITES. Claude Code rewrites ~/.claude.json on
+#         almost every action, so a read-write bind would push sandbox state into the
+#         real config (78 KB of project history, in the measured case), and its atomic
+#         save would fail against a mount point anyway.
+#
+# Why an agent needs this at all: the private home is empty, so an interactive agent
+# re-runs first-time setup on every run. For Claude Code that is the theme picker, the
+# login prompt, and then the folder-trust dialog -- all of it state in ~/.claude.json,
+# NOT in the credential file. `claude -p` skips all three, which is why a scripted run
+# can work while an interactive one still asks to authenticate. tools/claude-home.sh
+# builds a minimal seed; see the README.
+HOME_COPIED=()
+while IFS= read -r _cf; do
+  [ -n "$_cf" ] || continue
+  _src=${_cf%%:*}; _dst=${_cf#*:}; _dst=${_dst#/}
+  [ -f "$_src" ] || { echo "SANDBOX_HOME_COPIES: no such file: $_src" >&2; continue; }
+  mkdir -p "$(dirname "$OUT/homedir/$_dst")" || exit 1
+  cp -p "$_src" "$OUT/homedir/$_dst" || exit 1   # -p keeps the mode; these are secrets
+  HOME_COPIED+=( "$_dst" )
+done <<< "${SANDBOX_HOME_COPIES:-}"
+
 # GATE FIRST. A run against a broken jail is worse than no run: it can write to
 # production, or read the answer while the report calls it blinded.
 if ! "$HERE/verify-sandbox.sh" "$CASE" >"$OUT/verify.log" 2>&1; then
@@ -81,6 +108,7 @@ build_sandbox_args "$IMAGE" "$PKG_ROOT" "$PKG" "$VER" "$WORK" "$OUT" "$EMPTY" \
   echo "cwd=$PWD"; echo "autobound=${SANDBOX_AUTOBOUND[*]:-none}"
   # Paths only. Never the contents -- one of these is usually a credential.
   echo "home_files=${SANDBOX_HOME_FILES_BOUND[*]:-none}"
+  echo "home_copies=${HOME_COPIED[*]:-none}"
   echo "started=$(date -Is)"
   echo "mode=$([ "$SHELL_MODE" = 1 ] && echo interactive || echo scripted)"
   echo "agent_cmd=${AGENT_CMD:-<interactive shell>}"

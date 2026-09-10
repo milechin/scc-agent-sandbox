@@ -60,29 +60,53 @@ holding the skills you are testing, and the `.claude/` there is mounted automati
 S=/projectnb/<your-project>/scc-agent-sandbox            # the clone
 cd /projectnb/<your-project>/my-agent                    # ./.claude/skills is picked up
 
+# once: a minimal ~/.claude.json marking setup done and this run's dirs trusted
+"$S/tools/claude-home.sh" ./claude-seed.json "$HOME" "$PWD/work"
+
 export SANDBOX_AGENT_DIR=$HOME/.local                    # the binary; its bin/ goes on PATH
 export SANDBOX_HOME_FILES="$HOME/.claude/.credentials.json:.claude/.credentials.json"
+export SANDBOX_HOME_COPIES="$PWD/claude-seed.json:.claude.json"
 
-"$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" --shell      # drive it by hand
+"$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" --work "$PWD/work" --shell   # by hand
 "$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" \
-    --agent-cmd 'claude -p "install fftw 3.3.8" --allowedTools Bash'   # or scripted
+    --agent-cmd 'claude -p "install fftw 3.3.8" --allowedTools Bash'     # or scripted
 ```
 
-**The credential line is what stops the agent asking you to log in on every run.** The
-private `$HOME` starts empty, so Claude Code finds no
-`~/.claude/.credentials.json` and prompts. The file is bound in place, not copied, so
-your real credential never lands in a run directory. Verified with Claude Code 2.1.267
-on the pilot image: `claude -p` runs authenticated inside the jail with no prompt.
-`SINGULARITYENV_ANTHROPIC_API_KEY` works instead if you authenticate with an API key.
-See [`SANDBOX_HOME_FILES`](#sandbox_home_files-credentials-and-other-loose-files) for
-the trade-offs — the bind is read-write, which is how token refresh works.
+**Both lines are needed to stop Claude asking you to authenticate**, and they do
+different jobs — binding only the credential is not enough, which is easy to get
+wrong because it *looks* like it should be:
+
+| | file | why |
+|---|---|---|
+| `SANDBOX_HOME_FILES` | `.claude/.credentials.json` | the token, **bound** so it stays in your real home |
+| `SANDBOX_HOME_COPIES` | `.claude.json` | setup state, **copied** because Claude rewrites it |
+
+The private `$HOME` starts empty, so Claude Code re-runs first-time setup on every
+run: the theme picker, then the login prompt, then the folder-trust dialog. All three
+are state in `~/.claude.json`, *not* in the credential file. `claude -p` skips all
+three, so a scripted run can work while `--shell` still asks you to log in.
+
+`tools/claude-home.sh` writes a seed holding four onboarding keys and the trust flags
+for the directories you name — rather than your real `~/.claude.json`, which is large
+and personal (78 KB and 17 project paths on the machine this was written for) and has
+no business in a run directory. Name the workspace with `--work` so you can trust it
+in advance; otherwise it is stamped per run and Claude asks once when you `cd` there.
+
+Copied, not bound, because Claude rewrites this file constantly — measured at 42 KB by
+the end of one short run. A read-write bind would push all of that into your real
+config, and its atomic save would fail against a mount point anyway.
+
+Verified with Claude Code 2.1.267 on the pilot image: both `claude -p` and the
+interactive TUI start authenticated inside the jail, with no prompt.
+`SINGULARITYENV_ANTHROPIC_API_KEY` replaces the credential line if you use an API key.
 
 For another agent, the same three settings apply with different values;
 `SANDBOX_AUTOBIND_DIRS` changes the instruction directory name.
 
 Scripted output lands in `$OUT/agent.stdout` / `agent.stderr`, with `run.meta` and
-`argv.txt` recording exactly what ran — including `autobound=` and `home_files=`, so a
-run says what it was given.
+`argv.txt` recording exactly what ran — including `autobound=`, `home_files=` and
+`home_copies=`, so a run says what it was given. Paths only, never contents: one of
+those files is a credential.
 
 ### Where to clone it, and where to run it from
 
@@ -142,7 +166,8 @@ All optional, all environment variables.
 | `SANDBOX_VERBOSE=1` | restore Singularity's INFO/WARNING output when diagnosing |
 | `SANDBOX_AUTOBIND_DIRS` | instruction directory names to look for in the launch directory; default `.claude`, empty to disable |
 | `SANDBOX_AUTOBIND_FROM` | look there instead of the current directory |
-| `SANDBOX_HOME_FILES` | individual files to place in the private home, **one `src:dst` per line**, `dst` relative to `$HOME`; how an agent gets its credential |
+| `SANDBOX_HOME_FILES` | individual files **bound** into the private home, **one `src:dst` per line**, `dst` relative to `$HOME`; how an agent gets its credential |
+| `SANDBOX_HOME_COPIES` | same syntax, but **copied** — for config the agent rewrites, such as `.claude.json` |
 
 `SANDBOX_RO_BINDS` is a **string, not an array** — bash arrays cannot be exported, so
 an array set in your shell silently never arrives and the binds vanish without error.
