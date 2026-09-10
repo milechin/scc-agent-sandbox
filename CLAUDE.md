@@ -65,6 +65,12 @@ trying to collect. Keeping the mechanism generic and the agent name in a default
 is what keeps it inside the agent-agnostic rule — do not grow agent-specific logic
 around it.
 
+`SANDBOX_HOME_FILES` binds individual files into the private home, opt-in with no
+default because the case it exists for is a credential. Bound rather than copied so no
+live token lands in a run directory; read-write so token refresh works, which is also
+the only write path from the jail back into the real home. Measured: an in-place write
+to a bind-mounted file reaches the host, an atomic rename over it does not.
+
 `$OUT` defaults to `$PWD/results/<case>-<stamp>/`, not the clone: the harness is a
 mechanism, not a data store. The gate still verifies with `$OUT` under the harness
 directory on purpose — that is the nested layout where the run directory is restored

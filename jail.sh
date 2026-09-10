@@ -52,6 +52,7 @@ SANDBOX_RO_DIRS=(
 #
 # Sets: SANDBOX_ARGS (array)  SANDBOX_BLINDED (0|1)  SANDBOX_ENV (array of VAR=VAL)
 #       SANDBOX_AUTOBOUND (array of instruction dirs discovered in the launch dir)
+#       SANDBOX_HOME_FILES_BOUND (array of files placed in the private home)
 build_sandbox_args() {
   local image=$1 pkg_root=$2 pkg=$3 ver=$4 work=$5 out=$6 emptydir=$7
   shift 7
@@ -189,6 +190,36 @@ build_sandbox_args() {
       SANDBOX_AUTOBOUND+=( "$ab_name/$(basename "$ab_sub")" )
     done
   done
+
+  # Individual FILES placed in the private home, "src:dst" per line, dst relative to
+  # $HOME unless absolute. The case this exists for is a credential: the private home
+  # is empty, so an agent that authenticates from a file in $HOME asks the operator to
+  # log in again on every run.
+  #
+  # Bound in place rather than copied, so the credential stays in the real home and no
+  # live token is left behind in the run directory (which people copy around and attach
+  # to tickets). Bound READ-WRITE, which is a deliberate trade in both directions:
+  #
+  #   * an agent refreshing an expiring token writes THROUGH to the real file, which is
+  #     what keeps host and sandbox in sync -- but it also means the agent under test
+  #     can modify or corrupt the real credential. :ro instead makes refresh fail.
+  #   * measured on singularity-ce 4.5.0: an in-place write to a bind-mounted file
+  #     works and reaches the host file, but an ATOMIC replace (write temp, rename over
+  #     it) FAILS -- you cannot rename over a mount point. An agent that saves this way
+  #     will be unable to write. Copy the file into $OUT/homedir instead if that bites.
+  #
+  # Opt-in, no default: nothing that moves a credential should happen because someone
+  # ran from the wrong directory.
+  SANDBOX_HOME_FILES_BOUND=()
+  local hf hf_src hf_dst
+  while IFS= read -r hf; do
+    [ -n "$hf" ] || continue
+    hf_src=${hf%%:*}; hf_dst=${hf#*:}
+    [ -f "$hf_src" ] || continue
+    case "$hf_dst" in /*) ;; *) hf_dst="$HOME/$hf_dst" ;; esac
+    SANDBOX_ARGS+=( --bind "$hf_src:$hf_dst" )
+    SANDBOX_HOME_FILES_BOUND+=( "$hf_dst" )
+  done <<< "${SANDBOX_HOME_FILES:-}"
 
   # ---- 7. MASKS, LAST ---------------------------------------------------------
   # Everything above this line is visible; everything here is hidden. Appending in

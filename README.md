@@ -8,54 +8,22 @@ into its own repository and pointed at anyone's agent.
 
 ---
 
-## Install
+## Quick start
 
-Nothing to build. Clone it and run it — the only requirements are what the SCC already
-provides (`bash`, `git`, `singularity`).
+Needs a compute node (`$NSLOTS` set). Nothing to build or install beyond what the SCC
+already provides (`bash`, `git`, `singularity`).
 
 ```bash
-cd /projectnb/<your-project>          # or anywhere on a shared filesystem
+cd /projectnb/<your-project>          # a shared filesystem — see below
 git clone git@github.com:milechin/scc-agent-sandbox.git
+cd scc-agent-sandbox
+
+./verify-sandbox.sh cases/fftw-3.3.8.env     # prove the jail before trusting a run
+./run-agent.sh      cases/fftw-3.3.8.env --shell
 ```
 
 Use `https://github.com/milechin/scc-agent-sandbox.git` if you have no SSH key on the
 SCC.
-
-**Where to clone it.** Any shared filesystem — a project disk or your home directory.
-Not `/scratch` or `/tmp`: those are node-local, so a clone made on a login node is not
-there when the job lands on a compute node.
-
-**The clone is a mechanism, not a data directory.** Results go to `results/<case>-<stamp>/`
-in the directory you *run from*, so run it from the agent you are testing and both the
-results and the agent's instructions are found without any further configuration:
-
-```bash
-S=/projectnb/<your-project>/scc-agent-sandbox   # the clone, once
-cd /projectnb/<your-project>/my-agent           # the agent under test
-"$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" --shell
-```
-
-`--out <dir>` overrides the location outright. Running from inside the clone still
-works and puts results in `results/`, which is `.gitignored`.
-
-**Do not put the scripts on `PATH`.** Absolute paths already work from anywhere, but a
-**symlink** into `~/bin` breaks the harness outright: each script resolves its location
-with `dirname "$BASH_SOURCE"`, which yields the symlink's directory, so the
-`. "$HERE/jail.sh"` both scripts depend on finds nothing. A `PATH` entry pointing at
-the clone itself is harmless, and saves little — the case file is still a path you have
-to type.
-
----
-
-## Quick start
-
-Needs a compute node (`$NSLOTS` set) and nothing else installed.
-
-```bash
-cd scc-agent-sandbox
-./verify-sandbox.sh cases/fftw-3.3.8.env     # prove the jail before trusting a run
-./run-agent.sh      cases/fftw-3.3.8.env --shell
-```
 
 `run-agent.sh` runs the gate itself and **refuses to start** if it fails. You land at
 a prompt inside the container, with a banner naming the paths:
@@ -93,6 +61,33 @@ export SANDBOX_AGENT_DIR=$HOME/.local      # binds the agent in; its bin/ goes o
 Scripted output lands in `$OUT/agent.stdout` / `agent.stderr`, with `run.meta` and
 `argv.txt` recording exactly what ran.
 
+### Where to clone it, and where to run it from
+
+**Clone it on a shared filesystem** — a project disk or your home directory. Not
+`/scratch` or `/tmp`: those are node-local, so a clone made on a login node is not
+there when the job lands on a compute node.
+
+**Run it from wherever the results belong.** `results/<case>-<stamp>/` is written to
+the directory you run *from*, not the clone — the harness is a mechanism, not a data
+store. So the usual invocation is from the agent under test, which also gets its
+instructions mounted automatically (see [Configuration](#configuration)):
+
+```bash
+S=/projectnb/<your-project>/scc-agent-sandbox   # the clone, once
+cd /projectnb/<your-project>/my-agent           # the agent under test
+"$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" --shell
+```
+
+`--out <dir>` overrides the location outright. Running from inside the clone, as the
+quick start does, puts results in `results/`, which is `.gitignored`.
+
+**Do not put the scripts on `PATH`.** Absolute paths already work from anywhere, but a
+**symlink** into `~/bin` breaks the harness outright: each script resolves its location
+with `dirname "$BASH_SOURCE"`, which yields the symlink's directory, so the
+`. "$HERE/jail.sh"` both scripts depend on finds nothing. A `PATH` entry pointing at
+the clone itself is harmless, and saves little — the case file is still a path you have
+to type.
+
 ---
 
 ## Writing a case
@@ -124,6 +119,7 @@ All optional, all environment variables.
 | `SANDBOX_VERBOSE=1` | restore Singularity's INFO/WARNING output when diagnosing |
 | `SANDBOX_AUTOBIND_DIRS` | instruction directory names to look for in the launch directory; default `.claude`, empty to disable |
 | `SANDBOX_AUTOBIND_FROM` | look there instead of the current directory |
+| `SANDBOX_HOME_FILES` | individual files to place in the private home, **one `src:dst` per line**, `dst` relative to `$HOME`; how an agent gets its credential |
 
 `SANDBOX_RO_BINDS` is a **string, not an array** — bash arrays cannot be exported, so
 an array set in your shell silently never arrives and the binds vanish without error.
@@ -152,6 +148,38 @@ bind would provide nothing.
 Set `SANDBOX_AUTOBIND_DIRS` to another name for a non-Claude agent, or to the empty
 string to switch the mechanism off.
 
+### Authentication — stopping the agent asking you to log in
+
+The private `$HOME` starts empty, so an agent that authenticates from a file there —
+Claude Code reads `~/.claude/.credentials.json` — finds nothing and prompts for a login
+on every run. `SANDBOX_HOME_FILES` places the file in the private home:
+
+```bash
+export SANDBOX_AGENT_DIR=$HOME/.local     # the agent binary itself
+export SANDBOX_HOME_FILES="$HOME/.claude/.credentials.json:.claude/.credentials.json"
+```
+
+Measured with Claude Code 2.1.267 on the pilot image: `claude -p '...'` runs
+authenticated inside the jail, with no prompt. `run.meta` records the *paths* placed
+this way as `home_files=`, never their contents.
+
+The file is **bound, not copied**, so the credential stays in your real home and no
+live token is left in the run directory — which people copy around and attach to
+tickets. (An empty `.credentials.json` does appear under `results/<stamp>/homedir/`:
+that is the mount point Singularity materialises, not the token.)
+
+Three consequences of binding rather than copying, all measured:
+
+- The bind is **read-write**, so an agent refreshing an expiring token writes through
+  to your real file. That keeps host and sandbox in sync, and it also means the agent
+  under test can modify or corrupt your real credential.
+- An **atomic** save — write a temp file, rename over the target — **fails**, because
+  you cannot rename over a mount point. In-place writes work. If an agent saves the
+  atomic way, copy the file into `results/<stamp>/homedir/.claude/` before the run
+  instead.
+- An API key avoids all of this where it applies: `SINGULARITYENV_ANTHROPIC_API_KEY`
+  is forwarded like the other `SINGULARITYENV_*` variables.
+
 **The manual version.** The shell starts in `$HOME`, not your repo,
 so a project-scope agent finds nothing until you `cd` — and every repo path is
 read-only inside, so it would then be working somewhere it cannot write. Mounting the
@@ -177,6 +205,10 @@ They are then found from any cwd, leaving the writable workspace free to work in
 | `$HOME` | private per-run directory, writable, isolated from the real one |
 | this harness (`cases/`, `results/`) | masked — the answer key is not readable |
 | the workspace | the only writable path |
+
+The one deliberate hole: a file placed with `SANDBOX_HOME_FILES` is bound read-write,
+so writes to it reach the real file outside. That is what lets a credential refresh,
+and it is the only path by which the agent can change anything in your real home.
 
 ### Inspecting mounts from inside
 

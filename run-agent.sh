@@ -79,6 +79,8 @@ build_sandbox_args "$IMAGE" "$PKG_ROOT" "$PKG" "$VER" "$WORK" "$OUT" "$EMPTY" \
   echo "prior_ver=${PRIOR_VER:-}"; echo "blinded=$SANDBOX_BLINDED"
   echo "host=$(hostname)"; echo "nslots=${NSLOTS:-unset}"
   echo "cwd=$PWD"; echo "autobound=${SANDBOX_AUTOBOUND[*]:-none}"
+  # Paths only. Never the contents -- one of these is usually a credential.
+  echo "home_files=${SANDBOX_HOME_FILES_BOUND[*]:-none}"
   echo "started=$(date -Is)"
   echo "mode=$([ "$SHELL_MODE" = 1 ] && echo interactive || echo scripted)"
   echo "agent_cmd=${AGENT_CMD:-<interactive shell>}"
