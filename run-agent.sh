@@ -46,7 +46,16 @@ PKG_ROOT=${PKG_ROOT:-/share/pkg.8}
 BLIND_PATHS=("${BLIND_PATHS[@]:-}")
 
 STAMP=$(date +%Y%m%d-%H%M%S)
-OUT=${OUT:-$HERE/results/$(basename "$CASE" .env)-$STAMP}
+# Results land in the CURRENT directory, not in the clone. The harness is a mechanism,
+# not a data store: cloning it somewhere shared and collecting runs next to whatever
+# you are actually working on keeps the two separate, and keeps `git status` clean.
+# Run from inside the clone and you get the old behaviour, results/ being .gitignored.
+#
+# Either location is safe. jail.sh masks its own directory, and binds $OUT back only
+# when $OUT is underneath it -- so a run directory in the clone is restored, and one
+# outside is never masked in the first place. The workspace is bound explicitly in
+# both cases, so a cwd outside the site bind list still works.
+OUT=${OUT:-$PWD/results/$(basename "$CASE" .env)-$STAMP}
 WORK=${WORK:-$OUT/work}
 mkdir -p "$WORK" "$OUT/workdir" "$OUT/home" "$OUT/homedir" || exit 1
 # Mask source: mode 755 and OUTSIDE the harness tree -- see jail.sh for why.
@@ -69,6 +78,7 @@ build_sandbox_args "$IMAGE" "$PKG_ROOT" "$PKG" "$VER" "$WORK" "$OUT" "$EMPTY" \
   echo "pkg_root=$PKG_ROOT"; echo "pkg=$PKG"; echo "ver=$VER"
   echo "prior_ver=${PRIOR_VER:-}"; echo "blinded=$SANDBOX_BLINDED"
   echo "host=$(hostname)"; echo "nslots=${NSLOTS:-unset}"
+  echo "cwd=$PWD"; echo "autobound=${SANDBOX_AUTOBOUND[*]:-none}"
   echo "started=$(date -Is)"
   echo "mode=$([ "$SHELL_MODE" = 1 ] && echo interactive || echo scripted)"
   echo "agent_cmd=${AGENT_CMD:-<interactive shell>}"
@@ -88,7 +98,7 @@ if [ "$SHELL_MODE" = 1 ]; then
    blinded    $PKG_ROOT/$PKG/$VER $([ "$SANDBOX_BLINDED" = 1 ] && echo "(masked, 0 entries)" || echo "(NOT present — nothing masked)")
    workspace  $WORK            <- the only writable path
    state      $OUT/homedir     <- \$HOME inside; anything the agent writes there survives$([ -n "${SANDBOX_CAPTURE_AT:-}" ] && printf '\n   capture    %s <- bound at %s' "$OUT/home" "$SANDBOX_CAPTURE_AT")
-   read-only  /share, /usr/local, and the rest of the site bind list
+   read-only  /share, /usr/local, and the rest of the site bind list$([ "${#SANDBOX_AUTOBOUND[@]}" -gt 0 ] && printf '\n   agent dirs %s <- found in %s, mounted under $HOME' "${SANDBOX_AUTOBOUND[*]}" "$PWD")
 
    Everything outside the workspace is read-only. Type 'exit' to leave; the workspace
    and state directories above survive.

@@ -8,12 +8,51 @@ into its own repository and pointed at anyone's agent.
 
 ---
 
+## Install
+
+Nothing to build. Clone it and run it — the only requirements are what the SCC already
+provides (`bash`, `git`, `singularity`).
+
+```bash
+cd /projectnb/<your-project>          # or anywhere on a shared filesystem
+git clone git@github.com:milechin/scc-agent-sandbox.git
+```
+
+Use `https://github.com/milechin/scc-agent-sandbox.git` if you have no SSH key on the
+SCC.
+
+**Where to clone it.** Any shared filesystem — a project disk or your home directory.
+Not `/scratch` or `/tmp`: those are node-local, so a clone made on a login node is not
+there when the job lands on a compute node.
+
+**The clone is a mechanism, not a data directory.** Results go to `results/<case>-<stamp>/`
+in the directory you *run from*, so run it from the agent you are testing and both the
+results and the agent's instructions are found without any further configuration:
+
+```bash
+S=/projectnb/<your-project>/scc-agent-sandbox   # the clone, once
+cd /projectnb/<your-project>/my-agent           # the agent under test
+"$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" --shell
+```
+
+`--out <dir>` overrides the location outright. Running from inside the clone still
+works and puts results in `results/`, which is `.gitignored`.
+
+**Do not put the scripts on `PATH`.** Absolute paths already work from anywhere, but a
+**symlink** into `~/bin` breaks the harness outright: each script resolves its location
+with `dirname "$BASH_SOURCE"`, which yields the symlink's directory, so the
+`. "$HERE/jail.sh"` both scripts depend on finds nothing. A `PATH` entry pointing at
+the clone itself is harmless, and saves little — the case file is still a path you have
+to type.
+
+---
+
 ## Quick start
 
 Needs a compute node (`$NSLOTS` set) and nothing else installed.
 
 ```bash
-cd agent-sandbox
+cd scc-agent-sandbox
 ./verify-sandbox.sh cases/fftw-3.3.8.env     # prove the jail before trusting a run
 ./run-agent.sh      cases/fftw-3.3.8.env --shell
 ```
@@ -83,11 +122,37 @@ All optional, all environment variables.
 | `SANDBOX_RO_BINDS` | extra read-only binds, **one `src:dst` per line** |
 | `SANDBOX_CAPTURE_AT` | only for an agent whose state dir is *not* under `$HOME` |
 | `SANDBOX_VERBOSE=1` | restore Singularity's INFO/WARNING output when diagnosing |
+| `SANDBOX_AUTOBIND_DIRS` | instruction directory names to look for in the launch directory; default `.claude`, empty to disable |
+| `SANDBOX_AUTOBIND_FROM` | look there instead of the current directory |
 
 `SANDBOX_RO_BINDS` is a **string, not an array** — bash arrays cannot be exported, so
 an array set in your shell silently never arrives and the binds vanish without error.
 
-**Where an agent finds its instructions.** The shell starts in `$HOME`, not your repo,
+**Where an agent finds its instructions — the automatic version.** Run from a directory
+containing a `.claude/`, and each populated subdirectory of it is mounted read-only at
+the matching place under the private `$HOME`:
+
+```
+./.claude/skills  ->  $HOME/.claude/skills   (read-only)
+./.claude/agents  ->  $HOME/.claude/agents   (read-only)
+```
+
+So `cd <agent repo>; run-agent.sh <case> --shell` needs no configuration: the agent
+finds its instructions at user scope from any working directory. The banner lists what
+was picked up, and `run.meta` records it as `autobound=`.
+
+Note what is deliberately *not* bound. **Subdirectories, never `.claude` itself** —
+binding the parent read-only would leave the agent unable to write its own state, and
+Claude Code writes settings, todos and transcripts into `~/.claude`, so it would fail
+to start and the transcript you were collecting would never exist. **Loose files** such
+as `settings.json` or `CLAUDE.md` are skipped too: they are project-scope, and binding
+them at user scope changes their meaning. **Empty subdirectories** are skipped, as the
+bind would provide nothing.
+
+Set `SANDBOX_AUTOBIND_DIRS` to another name for a non-Claude agent, or to the empty
+string to switch the mechanism off.
+
+**The manual version.** The shell starts in `$HOME`, not your repo,
 so a project-scope agent finds nothing until you `cd` — and every repo path is
 read-only inside, so it would then be working somewhere it cannot write. Mounting the
 instructions into the private home avoids both:

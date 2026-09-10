@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # scc-agent-sandbox
 
 A Singularity jail for evaluating **software-install agents** on the BU SCC. Run an
@@ -15,6 +19,75 @@ Prototyped inside <https://github.com/bu-rcs/scc-agents> (branch
 and reference that context. That repo keeps its own **bwrap**-based harness under
 `tests/`, which is specific to one skill and its references; this one is deliberately
 agent-agnostic and was never meant to replace it.
+
+## Architecture
+
+Three bash files and a case file. No build, no dependency install, no test framework —
+everything runs from a compute node with `$NSLOTS` set.
+
+- **`jail.sh`** — the only place that composes an argv. Sourced (not executed) by both
+  other scripts, so verification and running use literally the same mounts; if they
+  diverge, the gate stops proving anything about the run. `build_sandbox_args` fills
+  three globals: `SANDBOX_ARGS` (the `singularity exec …` argv, image last),
+  `SANDBOX_ENV` (`SINGULARITYENV_*` pairs passed via `env`), `SANDBOX_BLINDED`.
+  Its second function, `build_sandbox_args_misordered`, exists solely as the gate's
+  negative control.
+- **`verify-sandbox.sh`** — the gate. Runs every probe inside *one* container instance
+  so it tests the real composed mount set, then re-runs the mis-ordered argv and
+  asserts the target **leaks**. Exit non-zero means do not run an agent.
+- **`run-agent.sh`** — invokes the gate first and refuses to start if it fails, then
+  execs the same jail with either `/bin/bash -l` (`--shell`) or `-lc "$AGENT_CMD"`.
+- **`cases/*.env`** — sourced shell: `IMAGE`, `PKG_ROOT`, `PKG`, `VER`, `PRIOR_VER`,
+  optional `EXPECT_BIN` and `BLIND_PATHS=()`.
+
+**Bind order is the entire security model.** Singularity has no `--exclude`; hiding a
+child of a bound parent means binding an empty directory over it, and the mask must be
+appended *after* the parent or it silently does nothing. Hence the section numbering in
+`build_sandbox_args`: 1 isolate → 2 read-only site dirs → 3 private `$HOME` over them →
+4 workspace → 5 scratch → 6 agent runtime and `SANDBOX_RO_BINDS` → **7 masks, last**.
+Any new bind must be placed by asking whether it should shadow or be shadowed.
+
+Two consequences that are easy to break:
+
+- Each mask gets its **own** directory under `$emptydir` (`_mask` numbers them). A
+  shared source stops being empty as soon as anything is bound back inside a masked
+  path, and the stray entry then appears in every other mask.
+- The harness masks **itself** (`SANDBOX_SELF_DIR`) because the site bind list sweeps
+  in `/projectnb`, `/usr1`, `/project`; the current run's `$OUT` is bound back on top
+  so the agent sees its own run and no other. `$emptydir` must therefore be mode 755
+  and live outside the harness tree.
+
+Section 6 also **auto-discovers** an agent's instruction directory in the launch
+directory (`SANDBOX_AUTOBIND_DIRS`, default `.claude`) and binds each populated
+subdirectory under the private `$HOME`. Subdirectories only: binding the config parent
+read-only would stop the agent writing its own state, which is the transcript you were
+trying to collect. Keeping the mechanism generic and the agent name in a default value
+is what keeps it inside the agent-agnostic rule — do not grow agent-specific logic
+around it.
+
+`$OUT` defaults to `$PWD/results/<case>-<stamp>/`, not the clone: the harness is a
+mechanism, not a data store. The gate still verifies with `$OUT` under the harness
+directory on purpose — that is the nested layout where the run directory is restored
+inside the harness mask, strictly harder than the un-nested default and still live
+whenever anyone runs from the clone. Do not "align" it to `$PWD`.
+
+The run directory holds `work/` (the only writable path), `homedir/` (`$HOME`
+inside), `run.meta`, `argv.txt` (the exact argv, for auditing a disputed run),
+`verify.log`, and `agent.stdout`/`.stderr` for scripted runs.
+
+## Commands
+
+```bash
+./verify-sandbox.sh cases/fftw-3.3.8.env                  # the gate — after ANY jail.sh change
+./run-agent.sh      cases/fftw-3.3.8.env --shell          # interactive, inside the jail
+./run-agent.sh      cases/fftw-3.3.8.env --agent-cmd '…'  # scripted; output captured to $OUT
+SANDBOX_VERBOSE=1 ./verify-sandbox.sh cases/…             # restore Singularity INFO/WARNING
+shellcheck jail.sh run-agent.sh verify-sandbox.sh         # sources carry shellcheck directives; not installed by default
+```
+
+There is no single-test runner: the gate is one script and prints per-check `ok`/`FAIL`
+lines. To iterate on one check, edit the probe block in `verify-sandbox.sh` — all probes
+share one container invocation on purpose.
 
 ## Working agreements
 

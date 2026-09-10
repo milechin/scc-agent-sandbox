@@ -51,6 +51,7 @@ SANDBOX_RO_DIRS=(
 # build_sandbox_args <image> <pkg_root> <pkg> <ver> <work> <out> <emptydir> [blind...]
 #
 # Sets: SANDBOX_ARGS (array)  SANDBOX_BLINDED (0|1)  SANDBOX_ENV (array of VAR=VAL)
+#       SANDBOX_AUTOBOUND (array of instruction dirs discovered in the launch dir)
 build_sandbox_args() {
   local image=$1 pkg_root=$2 pkg=$3 ver=$4 work=$5 out=$6 emptydir=$7
   shift 7
@@ -151,6 +152,43 @@ build_sandbox_args() {
     [ -n "$rb" ] || continue
     [ -e "${rb%%:*}" ] && SANDBOX_ARGS+=( --bind "$rb:ro" )
   done <<< "${SANDBOX_RO_BINDS:-}"
+
+  # Same idea, discovered instead of declared: if the directory the run was launched
+  # from holds an agent's instruction directory, mount it into the private home so the
+  # agent finds it from any cwd. Saves writing out the SANDBOX_RO_BINDS block by hand
+  # for the common case of `cd <agent repo>; run-agent.sh <case>`.
+  #
+  # SUBDIRECTORIES, NOT THE PARENT. Binding <name> itself read-only would make the
+  # whole config directory read-only inside, and an agent that writes its state there
+  # (Claude Code writes settings, transcripts and todos into ~/.claude) would be unable
+  # to start -- and the run's own transcript, usually the thing being collected, would
+  # never be produced. Binding one level down leaves $HOME/<name> writable.
+  #
+  # Loose files directly inside <name> are deliberately skipped: a project-scope
+  # settings.json or CLAUDE.md bound at user scope would change its meaning, and it is
+  # the harness author's environment leaking into a run that exists to observe the
+  # agent unaided.
+  #
+  # AGENT-AGNOSTIC, JUST BARELY. The mechanism knows nothing about any agent; ".claude"
+  # appears only as a default directory NAME. Override it for another agent's layout,
+  # or set it empty to switch the whole thing off:
+  #   SANDBOX_AUTOBIND_DIRS=".config/some-agent"   SANDBOX_AUTOBIND_DIRS=""
+  # SANDBOX_AUTOBIND_FROM overrides the source directory when it is not the cwd.
+  SANDBOX_AUTOBOUND=()
+  local ab_from=${SANDBOX_AUTOBIND_FROM:-$PWD} ab_name ab_sub
+  for ab_name in ${SANDBOX_AUTOBIND_DIRS-.claude}; do
+    [ -d "$ab_from/$ab_name" ] || continue
+    for ab_sub in "$ab_from/$ab_name"/*/; do
+      [ -d "$ab_sub" ] || continue          # no match: the glob came back literal
+      ab_sub=${ab_sub%/}
+      # Skip empty ones. An empty .claude/agents next to a populated .claude/skills is
+      # perfectly normal, the bind would provide nothing, and binding it anyway makes
+      # the gate's readability check fail on a repo that is not actually broken.
+      [ -n "$(ls -A "$ab_sub" 2>/dev/null)" ] || continue
+      SANDBOX_ARGS+=( --bind "$ab_sub:$HOME/$ab_name/$(basename "$ab_sub"):ro" )
+      SANDBOX_AUTOBOUND+=( "$ab_name/$(basename "$ab_sub")" )
+    done
+  done
 
   # ---- 7. MASKS, LAST ---------------------------------------------------------
   # Everything above this line is visible; everything here is hidden. Appending in

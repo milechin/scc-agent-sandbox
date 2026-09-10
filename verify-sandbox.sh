@@ -28,8 +28,14 @@ BLIND_PATHS=("${BLIND_PATHS[@]:-}")
 
 [ -f "$IMAGE" ] || { echo "image not found: $IMAGE" >&2; exit 2; }
 
-# Verify in the SAME layout a real run uses: $OUT under the harness directory, which
-# is where run-agent.sh puts it by default. With $OUT in $TMPDIR instead, the harness
+# Verify with $OUT under the harness directory -- the NESTED layout, where the run
+# directory has to be bound back inside the harness mask. run-agent.sh now defaults
+# $OUT to $PWD instead, which is the un-nested case and strictly easier: nothing is
+# restored inside a mask, so nothing can leak out of one. Verifying the harder layout
+# covers both, and it is still the live layout whenever anyone runs from the clone.
+# Do not "align" this to $PWD -- that would stop exercising the mask-restore path.
+#
+# With $OUT in $TMPDIR instead, the harness
 # mask never has the run directory bound back inside it, so the nested-mount-point
 # behaviour that leaked into the target mask is never exercised and the gate passes
 # while real runs leak. Checking a configuration nobody runs is how that got missed.
@@ -55,6 +61,19 @@ build_sandbox_args "$IMAGE" "$PKG_ROOT" "$PKG" "$VER" "$WORK" "$OUT" "$EMPTY" \
                    "${BLIND_PATHS[@]}"
 [ "$SANDBOX_BLINDED" = 1 ] || echo "  note  $PKG/$VER not present under $PKG_ROOT; nothing to blind"
 
+# If an instruction directory was auto-discovered in the launch directory, probe the
+# FIRST one: it must be readable inside, and its parent must still be WRITABLE. The
+# parent is the point -- binding the whole config directory read-only would stop an
+# agent writing its own state, which is the mistake this design exists to avoid, and
+# it would pass a check that only looked at readability.
+AB0=${SANDBOX_AUTOBOUND[0]:-}
+AB_PROBE=""
+if [ -n "$AB0" ]; then
+  AB_PROBE='
+  t abread "$(ls -A "$HOME/'"$AB0"'" 2>/dev/null | wc -l)"
+  touch "$HOME/'"${AB0%%/*}"'/.probe" 2>/dev/null && { t abparent rw; rm -f "$HOME/'"${AB0%%/*}"'/.probe"; } || t abparent ro'
+fi
+
 # Every probe in ONE container instance, so this tests the real composed mount set
 # rather than several different partial ones.
 out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
@@ -71,7 +90,7 @@ out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   touch "$HOME/.probe" 2>/dev/null && { t homerw rw; rm -f "$HOME/.probe"; } || t homerw ro
   t homecount "$(ls -A "$HOME" 2>/dev/null | wc -l)"
   t harness "$(ls -A "'"$HERE"'/cases" 2>/dev/null | wc -l)"
-  getent hosts github.com >/dev/null 2>&1 && t dns ok || t dns down
+  getent hosts github.com >/dev/null 2>&1 && t dns ok || t dns down'"$AB_PROBE"'
 ' 2>&1)
 
 g() { sed -n "s/^$1=//p" <<<"$out"; }
@@ -112,6 +131,16 @@ if [ "$(g homecount)" -le 4 ] 2>/dev/null; then
   printf '  ok    %-46s %s entries (isolated)\n' "\$HOME is NOT the real home" "$(g homecount)"; pass=$((pass+1))
 else
   printf '  FAIL  %-46s %s entries — the real home is exposed\n' "\$HOME is NOT the real home" "$(g homecount)"; fail=$((fail+1))
+fi
+
+if [ -n "$AB0" ]; then
+  echo "  --- agent instructions (auto-bound from $PWD) ---"
+  if [ "$(g abread)" -gt 0 ] 2>/dev/null; then
+    printf '  ok    %-46s %s entries\n' "\$HOME/$AB0 readable" "$(g abread)"; pass=$((pass+1))
+  else
+    printf '  FAIL  %-46s empty or missing\n' "\$HOME/$AB0 readable"; fail=$((fail+1))
+  fi
+  check "\$HOME/${AB0%%/*} still writable"   rw       "$(g abparent)"
 fi
 
 # The site binds sweep in whatever filesystem the harness lives on, so cases/*.env --
