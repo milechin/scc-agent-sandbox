@@ -3,297 +3,198 @@
 A Singularity jail for evaluating **software-install agents** on the BU SCC: run an
 agent against a real package tree with one version hidden, and see what it does.
 
-Self-contained on purpose — the agent is a command string, so this directory can be
-lifted into its own repository and pointed at anyone's agent. Nothing here knows
-about a particular skill, prompt or reference layout.
+Agent-agnostic — the agent is just a command string — so this directory can be lifted
+into its own repository and pointed at anyone's agent.
 
-```bash
-./verify-sandbox.sh cases/fftw-3.3.8.env          # gate: prove the jail first
-./run-agent.sh      cases/fftw-3.3.8.env --agent-cmd '<your agent>'
-```
+---
 
-`run-agent.sh` runs the gate itself and **refuses to start** if it fails.
+## Quick start
 
-## What the jail guarantees
-
-| | |
-|---|---|
-| `/share` and the package tree | **read-only** — writes return `EROFS` |
-| the target `<pkg>/<ver>` | **masked** — 0 entries, and absent from `module avail` |
-| sibling versions | readable, so prior art still works |
-| `$HOME`, `/tmp` | empty, isolated from the host's |
-| the workspace | the only writable path |
-
-## The four things that will bite you
-
-Measured on `singularity-ce 4.5.0-1.el8`. Each is why the code looks the way it does.
-
-**1. There is no `--exclude` flag, and bind order is the whole mechanism.**
-Hiding a child of a bound parent is done by *masking* — binding an empty directory
-over it — and the mask must come **after** the parent. Reversed, the parent overlays
-the mask and the target is fully readable, with no error, no warning and no exit
-code to notice. `verify-sandbox.sh` builds a deliberately mis-ordered argv and
-asserts it **fails** to blind; a blinding check that only ever sees the correct order
-cannot tell a working mask from an unnecessary one.
-
-**2. A bind is read-write by default.** `-B /share` gives write access to `/share`.
-The `:ro` suffix is what makes it read-only. The site wrapper
-`/share/singularity/utils/scc-singularity` generates every bind read-write — correct
-for interactive work, wrong for a test jail. This borrows its bind list and its
-`SINGULARITYENV_*` handling and composes its own argv. Use `--scc-preview` to see
-what the site expects.
-
-**3. `--mount` supports only `type=bind`.** `type=tmpfs` is rejected outright, so the
-mask needs a real empty directory on the host.
-
-**4. `--contain` gives `$HOME` and `/tmp` a fresh tmpfs capped at 64 MB.** The image
-itself stays read-only (container root is an `overlay`), so dotfiles written inside
-live in RAM and vanish at exit. Two consequences: anything an agent writes to `$HOME`
-— caches, shell state — hits `ENOSPC` at 64 MB and surfaces as an unrelated-looking
-failure, so `--workdir` puts the session directories on real disk; and an agent
-binary living under `$HOME` disappears, so it must be bound back in.
-
-## What blinding looks like from inside
-
-```
-ls /share/pkg.7/fftw/          ->  2.1.5_intel-2018_openmpi-3.1.1  3.3.8
-ls -A /share/pkg.7/fftw/3.3.8  ->  (empty)
-cat .../3.3.8/notes.txt        ->  No such file or directory
-module avail fftw              ->  3.3.8 absent
-module load fftw/3.3.8         ->  "The following module(s) are unknown"
-```
-
-The version **directory entry stays visible** while its contents are gone. Hiding the
-entry as well is possible — mask `<pkg>/` and bind each sibling version back — and it
-was built and working, then reverted on purpose: it costs one bind per sibling (47
-instead of 26 for the worst package in the corpus) and adds a second code path, to
-save an agent from glancing at an empty directory. An empty directory is
-self-explanatory; the extra machinery was not worth it.
-
-Note the asymmetry that makes this work: the module system says the version does
-**not exist** (the modulefile is a symlink into the masked directory, so Lmod skips
-it), while the filesystem shows an empty directory. An agent asking "is it installed?"
-through the normal route — `module avail` — gets a clean no.
-
-## Masking hides the module too — if the Lmod cache is off
-
-Published modulefiles are **symlinks into the package directory**
-(`/share/module.7/libraries/fftw/3.3.8.lua -> /share/pkg.7/fftw/3.3.8/modulefile.lua`).
-Masking the package directory dangles that symlink, and Lmod skips dangling symlinks
-on a live scan, so the version disappears cleanly:
-
-```
-module avail fftw        ->  fftw/2.1.5_intel-2018_openmpi-3.1.1
-module load  fftw/3.3.8  ->  Lmod ... The following module(s) are unknown
-```
-
-That is the state you want: the version does not exist, so there is no phantom for
-the agent to troubleshoot.
-
-**But a cached scan still lists it.** With `~/.cache/lmod` present, `module avail`
-shows the masked version and loading it fails with `Unable to load module because of
-error` — the confusing case. `--contain` avoids it by giving the container no home
-cache, and `LMOD_IGNORE_CACHE=yes` is injected as a belt-and-braces second guard.
-`verify-sandbox.sh` asserts *absent*, not merely *broken*.
-
-## Interactive: drive an agent by hand
-
-`--shell` drops you at a prompt **inside the verified jail** — same mounts, same
-blinding, same gate as a scripted run. Use it to run an exercise step by step, steer
-as you go, or try a new agent before writing a case for it.
+Needs a compute node (`$NSLOTS` set) and nothing else installed.
 
 ```bash
 cd agent-sandbox
-export SANDBOX_AGENT_DIR=$HOME/.local          # bound read-only; its bin/ goes on PATH
-./run-agent.sh cases/fftw-3.3.8.env --shell
+./verify-sandbox.sh cases/fftw-3.3.8.env     # prove the jail before trusting a run
+./run-agent.sh      cases/fftw-3.3.8.env --shell
 ```
 
-You get a banner naming the workspace, the capture directory and what is masked, then
-a normal shell:
+`run-agent.sh` runs the gate itself and **refuses to start** if it fails. You land at
+a prompt inside the container, with a banner naming the paths:
 
 ```
   ── sandbox shell ─────────────────────────────────────────────
    image      scc-centos7-2023-06-01.simg
    blinded    /share/pkg.7/fftw/3.3.8 (masked, 0 entries)
-   workspace  .../work            <- the only writable path
+   workspace  .../results/<stamp>/work   <- the only writable path
+   state      .../results/<stamp>/homedir <- $HOME inside; survives exit
 ```
 
-A worked exercise, all verified to run in the pilot image:
+Everything under `results/<stamp>/` survives. Type `exit` to leave.
+
+### Try it by hand
 
 ```bash
 cat /etc/redhat-release          # CentOS Linux release 7.9.2009 — you are inside
-claude --version                 # 2.1.233 (Claude Code)
-
-module avail fftw                # 2.1.5_intel-2018_openmpi-3.1.1 — 3.3.8 is ABSENT
+module avail fftw                # 3.3.8 is ABSENT
 module load fftw/3.3.8           # "The following module(s) are unknown"
-ls -A /share/pkg.7/fftw/3.3.8    # empty: the mask
-ls /share/pkg.7/fftw/2.1.5*      # prior art still readable
-
+ls -A /share/pkg.7/fftw/3.3.8    # empty — the mask
+ls /share/pkg.7/fftw/2.1.5*      # prior versions still readable
 touch /share/pkg.7/probe         # Read-only file system
-cd "$WORKSPACE_OR_YOUR_WORK_DIR" # the only writable path (printed in the banner)
-
-claude                           # drive it interactively from here
-exit                             # results and captured state survive
+cd <the workspace from the banner>   # the only place you can write
 ```
 
-**Checking what is read-only from inside.** Useful when an agent hits an unexpected
-`Read-only file system` and you want to see the layout it is working in:
+### Run an agent instead of a shell
 
 ```bash
-findmnt -rno TARGET,VFS-OPTIONS        # every mount, with ro/rw
-findmnt -O ro -rno TARGET              # just the read-only ones
-findmnt --target /share/pkg.7 -no TARGET,VFS-OPTIONS   # what governs ONE path
-awk '$5 == "/share" {print $5, $6}' /proc/self/mountinfo   # no-tooling fallback
+export SANDBOX_AGENT_DIR=$HOME/.local      # binds the agent in; its bin/ goes on PATH
+./run-agent.sh cases/fftw-3.3.8.env --shell            # then run it by hand
+./run-agent.sh cases/fftw-3.3.8.env --agent-cmd '...'  # or scripted, captured
 ```
 
-Two traps. A plain listing shows **shadowed** mounts — `/usr1` is `ro` while
-`/usr1/scv/milechin` is `rw`, because the private home is bound over it — so reading
-the first match tells you the wrong thing; `--target` resolves which mount actually
-governs a path. And `rw` does not guarantee you can write: the mount flag is one gate,
-directory permissions another. The ground truth is a write attempt, which is why
-`verify-sandbox.sh` probes with `touch` rather than trusting the flags.
+Scripted output lands in `$OUT/agent.stdout` / `agent.stderr`, with `run.meta` and
+`argv.txt` recording exactly what ran.
 
-**What persists.** `$HOME` is a private per-run directory (`$OUT/homedir`) bound over
-the real one, so anything the agent writes to `~/.claude`, `~/.config` or a dotfile is
-there afterwards — no extra plumbing. The workspace and `$OUT` survive too. Nothing
-you do inside can touch the real home or `/share`.
+---
 
-**Why a private `$HOME` and not just `--contain`:** the site bind list includes
-`/usr1`…`/usr4`, and home lives under one of them, so that read-only bind lands *on
-top of* `--contain`'s tmpfs and the real home reappears — measured at 209 entries with
-`~/.claude` readable and `$HOME` not writable. Binding a per-run home after the site
-dirs fixes both. `verify-sandbox.sh` checks for this explicitly (`$HOME is writable`,
-`$HOME is NOT the real home`), because it is a silent regression otherwise.
-
-### Where do the skills come from? (cwd matters)
-
-The shell starts in `$HOME` — the private per-run home — **not** in your repo. So an
-agent that discovers instructions from its working directory will find none until you
-`cd`. Two ways to handle it, and the second is usually better:
-
-**Project scope — `cd` to the repo.** Works, and needs no setup:
+## Writing a case
 
 ```bash
-cd /path/to/your/repo      # .claude/skills is readable here
-claude
+IMAGE=/share/singularity/images/files/scc-centos7-2023-06-01.simg
+PKG_ROOT=/share/pkg.7      # a parameter: /share/pkg.8 with an alma8 image
+PKG=fftw
+VER=3.3.8                  # blinded
+PRIOR_VER=2.1.5_intel-2018_openmpi-3.1.1
+EXPECT_BIN=fftw-wisdom      # optional; recorded as produced_expect_bin in run.meta
+BLIND_PATHS=(               # anything else to hide
+  /path/to/another/answer/key
+)
 ```
 
-The catch: **every repo path is read-only inside the jail**, so the agent is working
-in a directory it cannot write to. Fine for a read-only exercise, awkward for a real
-install.
+Run `./verify-sandbox.sh <case>` after writing one. It catches mistakes — a
+`PRIOR_VER` that does not exist under `PKG_ROOT` fails as unreadable.
 
-**User scope — mount the instructions into the private home.** Then they are found
-from *any* cwd, and the agent can work in the writable workspace:
+## Configuration
+
+All optional, all environment variables.
+
+| variable | effect |
+|---|---|
+| `SANDBOX_AGENT_DIR` | bound read-only so the agent exists inside; its `bin/` goes on `PATH` |
+| `SANDBOX_RO_BINDS` | extra read-only binds, **one `src:dst` per line** |
+| `SANDBOX_CAPTURE_AT` | only for an agent whose state dir is *not* under `$HOME` |
+| `SANDBOX_VERBOSE=1` | restore Singularity's INFO/WARNING output when diagnosing |
+
+`SANDBOX_RO_BINDS` is a **string, not an array** — bash arrays cannot be exported, so
+an array set in your shell silently never arrives and the binds vanish without error.
+
+**Where an agent finds its instructions.** The shell starts in `$HOME`, not your repo,
+so a project-scope agent finds nothing until you `cd` — and every repo path is
+read-only inside, so it would then be working somewhere it cannot write. Mounting the
+instructions into the private home avoids both:
 
 ```bash
 R=/path/to/your/repo
 export SANDBOX_RO_BINDS="$R/.claude/skills:$HOME/.claude/skills
 $R/.claude/agents:$HOME/.claude/agents
 $R/.claude/references:$HOME/.claude/references"
-./run-agent.sh cases/fftw-3.3.8.env --shell
 ```
 
-Verified inside: `~/.claude/skills` → the skill, `~/.claude/agents` → the sub-agent,
-`~/.claude/references` → 9 files, all read-only — while `~/.claude` itself stays
-**writable**, so the agent can still write its own state alongside them.
+They are then found from any cwd, leaving the writable workspace free to work in.
+`$HOME/.claude` itself stays writable, so the agent can still write its own state.
 
-**Output noise.** Singularity is run with `-s` (errors only). Two messages otherwise
-fire on *every* run by construction — `INFO: Creating empty target directory for
-nested bind` and `WARNING: path ... is already overridden`, the latter because the
-private home deliberately overrides `--workdir`'s home. Suppressing them keeps a real
-failure visible instead of buried; a genuine `FATAL` still prints under `-s`, verified.
-Set `SANDBOX_VERBOSE=1` to get everything back when diagnosing.
+## What the jail guarantees
 
-`SANDBOX_RO_BINDS` is a **string**, one `src:dst` per line, not an array — bash arrays
-cannot be exported, so an array set in your shell silently never reaches the script and
-the binds vanish with no error.
+| | |
+|---|---|
+| `/share` and the package tree | read-only — writes return `EROFS` |
+| the target `<pkg>/<ver>` | contents masked; absent from `module avail` |
+| sibling versions | readable, so prior art works |
+| `$HOME` | private per-run directory, writable, isolated from the real one |
+| this harness (`cases/`, `results/`) | masked — the answer key is not readable |
+| the workspace | the only writable path |
 
-**Getting the agent on `PATH`:** binding it in is not enough — `-e` gives the container
-its own `PATH`, so a binary under `~/.local/bin` is present but "command not found".
-Setting `SANDBOX_AGENT_DIR` handles it: if it has a `bin/`, that goes on `PATH` via
-`SINGULARITYENV_PREPEND_PATH`. Otherwise just call the binary by absolute path.
-
-## Scripted: one command, captured
+### Inspecting mounts from inside
 
 ```bash
-export SANDBOX_AGENT_DIR=$HOME/.local
-./run-agent.sh cases/fftw-3.3.8.env --agent-cmd 'claude -p "install fftw 3.3.8"'
+findmnt -O ro -rno TARGET                              # the read-only mounts
+findmnt --target /share/pkg.7 -no TARGET,VFS-OPTIONS   # what governs ONE path
+awk '$5 == "/share" {print $5, $6}' /proc/self/mountinfo   # no-tooling fallback
 ```
 
-Output lands in `$OUT/agent.stdout` / `agent.stderr`, with `run.meta` and `argv.txt`
-recording exactly what ran. `SANDBOX_CAPTURE_AT` is only needed for an agent whose
-state directory is *not* under `$HOME`; state under `$HOME` already persists.
+A plain listing shows **shadowed** mounts — `/usr1` is `ro` while `/usr1/scv/<you>` is
+`rw` on top of it — so reading the first match reports the opposite of the truth;
+`--target` resolves which mount governs a path. And `rw` does not promise you can
+write: permissions are a separate gate. The ground truth is a write attempt, which is
+why the gate probes with `touch`.
 
-## What the agent can see of your repo — and what it must not
+---
 
-The site bind list includes `/projectnb`, `/usr1`, `/project` and friends, so **any
-repository living under one of them is swept into the container read-only**, whether
-or not you bind it. That is usually what you want: it is how an agent finds its own
-skill files and references.
+## How it works
 
-It is also how an answer key leaks. Measured before the fix, from inside the jail:
+Everything below is measured on `singularity-ce 4.5.0-1.el8`, and each point is why
+some part of `jail.sh` looks the way it does.
 
-```
-.claude/skills:  scc-install-from-source        <- wanted
-.claude/references: 9 files                     <- wanted
-agent-sandbox/cases/fftw-3.3.8.env              <- THE ANSWER KEY, readable
-tests/cases/*.env                               <- another harness's answer keys
-```
+**Bind order is the whole mechanism, and getting it wrong fails silently.** There is
+no `--exclude`/`--unbind` flag, so hiding a child of a bound parent means *masking* —
+binding an empty directory over it — and the mask must come **after** the parent.
+Reversed, the parent overlays the mask and the target is fully readable, with no
+error, warning or exit code. `verify-sandbox.sh` builds a deliberately mis-ordered
+argv and asserts it **fails** to blind; a check that only ever sees the correct order
+cannot tell a working mask from an unnecessary one.
 
-Two layers handle it:
+**A bind is read-write by default.** `:ro` is what makes it read-only. The site
+wrapper `scc-singularity` generates every bind read-write — right for interactive
+work, wrong for a jail — so this borrows its bind list and `SINGULARITYENV_*`
+handling and composes its own argv. (`--scc-preview` prints what the site expects.)
 
-1. **The harness masks itself automatically.** `jail.sh` masks `SANDBOX_SELF_DIR`
-   (the directory it lives in), so `cases/` and `results/` are always empty inside.
-   Self-protecting on purpose — a `BLIND_PATHS` entry someone forgets to add is
-   exactly the failure this prevents. `verify-sandbox.sh` asserts it.
-   The run's own output directory is bound back afterwards when it lives under the
-   harness (the default, `results/<case>-<stamp>/`), so the agent sees its own run and
-   nothing else — no `cases/*.env`, no earlier results. Two constraints follow, and
-   getting any of them wrong is a failure, and only the first is loud: the mask source
-   must be **mode 755**, because Singularity materialises the nested mount point
-   inside it before mounting (`mkdirat: permission denied` otherwise); it must live
-   **outside** the masked tree, or it is a mount loop; and **each mask needs its own
-   directory**. That last one is the quiet failure: with a single shared "empty"
-   source, materialising the run directory's mount point inside it leaves `results/`
-   there, and every *other* mask using the same source then shows that entry — so
-   `ls -A /share/pkg.7/fftw/3.3.8` returned `results` while the gate reported the
-   target blinded.
+**Each mask needs its own directory, mode 755, outside the masked tree.** Singularity
+materialises nested mount points *inside* the mask source before mounting. So a 555
+source fails outright (`mkdirat: permission denied`), a source inside its own target
+is a mount loop, and — the quiet one — a single shared source stops being empty once
+anything is bound back inside a masked path, making every *other* mask show the stray
+entry.
 
-2. **Anything else is the case author's job**, via `BLIND_PATHS`. The prototype
-   cannot know about a second harness, a notes archive or a scratch copy of the
-   answer and still be liftable into another repo. The pilot case masks
-   `install_agent/tests` for this reason.
+**`--contain` is not enough for `$HOME`.** It gives `$HOME` and `/tmp` fresh tmpfs
+capped at 64 MB, but the site bind list includes `/usr1`…`/usr4` and home lives under
+one of them, so that read-only bind lands on top and the real home reappears —
+measured at 209 entries, readable, and not writable. A per-run directory bound over
+`$HOME` *after* the site dirs fixes both isolation and writability, and `--workdir`
+keeps the session directories off the 64 MB tmpfs.
 
-After both: `tests/` and `agent-sandbox/` read as 0 entries, while `.claude/skills`
-and the references stay visible.
+**Masking the package dir also hides the module — if the Lmod cache is off.**
+Modulefiles are symlinks into the package directory
+(`module.7/libraries/fftw/3.3.8.lua -> pkg.7/fftw/3.3.8/modulefile.lua`), so masking
+dangles the symlink and Lmod skips it on a live scan: the version reports as
+*unknown* rather than existing-but-broken. A cached scan still lists it, so
+`LMOD_IGNORE_CACHE=yes` is injected and the gate asserts *absent*, not merely broken.
 
-## Case files
+**Your repo is swept in whether you bind it or not.** The site list includes
+`/projectnb`, so a repo living there arrives read-only — which is how an agent finds
+its skill files, and also how an answer key leaks. `jail.sh` masks its own directory
+automatically (with this run's output bound back, so the agent sees its own run and
+nothing else); anything else — a second harness, a notes archive, `.git` — is the
+case author's job via `BLIND_PATHS`.
 
-```bash
-IMAGE=/share/singularity/images/files/scc-centos7-2023-06-01.simg
-PKG_ROOT=/share/pkg.7      # the tree is a parameter: /share/pkg.8 with an alma8 image
-PKG=fftw
-VER=3.3.8                  # masked
-PRIOR_VER=2.1.5_intel-2018_openmpi-3.1.1
-BLIND_PATHS=()             # anything else to hide
-```
-
-`PKG_ROOT` is what lets the same code pilot on CentOS 7 today and target alma8 later
-without a rewrite.
+**The version directory entry stays visible**, only its contents are masked. Hiding
+the entry as well is possible — mask `<pkg>/` and bind each sibling back — and was
+built, then reverted: one extra bind per sibling (47 vs 26 for the worst package in
+the corpus) and a second code path, to save an agent glancing at an empty directory.
+The module system already reports the version as non-existent, so the normal question
+gets a clean answer.
 
 ## What an image must provide
 
 - Lmod, and a `MODULEPATH` matching its own OS generation. The `scc-centos7` image
-  resolves to `/share/module.7`, which is why a `pkg.7` target makes it a real test
-  rather than a mock.
+  resolves to `/share/module.7`, which is why a `pkg.7` target makes the pilot a real
+  test rather than a mock.
 - A toolchain, if the agent is expected to build anything.
 
 ## Known limits
 
-- **Container-in-container is unresolved.** Running Singularity inside the pilot
-  image fails with `libsubid.so.3: cannot open shared object file` — an alma8 binary
-  against CentOS 7 libraries, i.e. an OS mismatch, *not* the setuid restriction that
-  blocks containers under `bwrap`. The host `starter-suid` is setuid, so retest on
-  the alma8 image before concluding either way.
-- The pilot image is CentOS 7. Use it to exercise the jail machinery and `pkg.7`
-  installs; alma8 work needs the alma8 image.
+- **Container-in-container is unresolved.** Nested Singularity fails in the pilot with
+  `libsubid.so.3: cannot open shared object file` — an alma8 binary against CentOS 7
+  libraries, *not* the setuid restriction that blocks containers under `bwrap`. The
+  host `starter-suid` is setuid, so retest on the alma8 image before concluding.
+- **The pilot image is CentOS 7.** Good for exercising the jail and `pkg.7` installs;
+  alma8 work needs the alma8 image. An agent whose references describe alma8 and
+  `/share/pkg.8` will disagree with what it sees inside.
