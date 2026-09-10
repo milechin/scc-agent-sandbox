@@ -52,14 +52,37 @@ cd <the workspace from the banner>   # the only place you can write
 
 ### Run an agent instead of a shell
 
+An agent needs three things inside: its **binary**, its **credential**, and its
+**instructions**. For Claude Code, all three are one block — run it from the directory
+holding the skills you are testing, and the `.claude/` there is mounted automatically:
+
 ```bash
-export SANDBOX_AGENT_DIR=$HOME/.local      # binds the agent in; its bin/ goes on PATH
-./run-agent.sh cases/fftw-3.3.8.env --shell            # then run it by hand
-./run-agent.sh cases/fftw-3.3.8.env --agent-cmd '...'  # or scripted, captured
+S=/projectnb/<your-project>/scc-agent-sandbox            # the clone
+cd /projectnb/<your-project>/my-agent                    # ./.claude/skills is picked up
+
+export SANDBOX_AGENT_DIR=$HOME/.local                    # the binary; its bin/ goes on PATH
+export SANDBOX_HOME_FILES="$HOME/.claude/.credentials.json:.claude/.credentials.json"
+
+"$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" --shell      # drive it by hand
+"$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" \
+    --agent-cmd 'claude -p "install fftw 3.3.8" --allowedTools Bash'   # or scripted
 ```
 
+**The credential line is what stops the agent asking you to log in on every run.** The
+private `$HOME` starts empty, so Claude Code finds no
+`~/.claude/.credentials.json` and prompts. The file is bound in place, not copied, so
+your real credential never lands in a run directory. Verified with Claude Code 2.1.267
+on the pilot image: `claude -p` runs authenticated inside the jail with no prompt.
+`SINGULARITYENV_ANTHROPIC_API_KEY` works instead if you authenticate with an API key.
+See [`SANDBOX_HOME_FILES`](#sandbox_home_files-credentials-and-other-loose-files) for
+the trade-offs — the bind is read-write, which is how token refresh works.
+
+For another agent, the same three settings apply with different values;
+`SANDBOX_AUTOBIND_DIRS` changes the instruction directory name.
+
 Scripted output lands in `$OUT/agent.stdout` / `agent.stderr`, with `run.meta` and
-`argv.txt` recording exactly what ran.
+`argv.txt` recording exactly what ran — including `autobound=` and `home_files=`, so a
+run says what it was given.
 
 ### Where to clone it, and where to run it from
 
@@ -148,20 +171,14 @@ bind would provide nothing.
 Set `SANDBOX_AUTOBIND_DIRS` to another name for a non-Claude agent, or to the empty
 string to switch the mechanism off.
 
-### Authentication — stopping the agent asking you to log in
+### `SANDBOX_HOME_FILES`: credentials and other loose files
 
-The private `$HOME` starts empty, so an agent that authenticates from a file there —
-Claude Code reads `~/.claude/.credentials.json` — finds nothing and prompts for a login
-on every run. `SANDBOX_HOME_FILES` places the file in the private home:
-
-```bash
-export SANDBOX_AGENT_DIR=$HOME/.local     # the agent binary itself
-export SANDBOX_HOME_FILES="$HOME/.claude/.credentials.json:.claude/.credentials.json"
-```
-
-Measured with Claude Code 2.1.267 on the pilot image: `claude -p '...'` runs
-authenticated inside the jail, with no prompt. `run.meta` records the *paths* placed
-this way as `home_files=`, never their contents.
+Individual files placed in the private home, one `src:dst` per line, `dst` relative to
+`$HOME`. The case it exists for is a **credential** — see
+[Run an agent instead of a shell](#run-an-agent-instead-of-a-shell) for the Claude Code
+recipe. Opt-in with no default: nothing that moves a credential should happen because
+someone ran from a particular directory. `run.meta` records the *paths* placed this way
+as `home_files=`, never their contents.
 
 The file is **bound, not copied**, so the credential stays in your real home and no
 live token is left in the run directory — which people copy around and attach to
