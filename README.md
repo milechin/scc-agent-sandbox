@@ -136,6 +136,23 @@ claude                           # drive it interactively from here
 exit                             # results and captured state survive
 ```
 
+**Checking what is read-only from inside.** Useful when an agent hits an unexpected
+`Read-only file system` and you want to see the layout it is working in:
+
+```bash
+findmnt -rno TARGET,VFS-OPTIONS        # every mount, with ro/rw
+findmnt -O ro -rno TARGET              # just the read-only ones
+findmnt --target /share/pkg.7 -no TARGET,VFS-OPTIONS   # what governs ONE path
+awk '$5 == "/share" {print $5, $6}' /proc/self/mountinfo   # no-tooling fallback
+```
+
+Two traps. A plain listing shows **shadowed** mounts — `/usr1` is `ro` while
+`/usr1/scv/milechin` is `rw`, because the private home is bound over it — so reading
+the first match tells you the wrong thing; `--target` resolves which mount actually
+governs a path. And `rw` does not guarantee you can write: the mount flag is one gate,
+directory permissions another. The ground truth is a write attempt, which is why
+`verify-sandbox.sh` probes with `touch` rather than trusting the flags.
+
 **What persists.** `$HOME` is a private per-run directory (`$OUT/homedir`) bound over
 the real one, so anything the agent writes to `~/.claude`, `~/.config` or a dotfile is
 there afterwards — no extra plumbing. The workspace and `$OUT` survive too. Nothing
