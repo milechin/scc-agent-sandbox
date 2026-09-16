@@ -53,12 +53,14 @@ SANDBOX_RO_DIRS=(
 # Sets: SANDBOX_ARGS (array)  SANDBOX_BLINDED (0|1)  SANDBOX_ENV (array of VAR=VAL)
 #       SANDBOX_AUTOBOUND (array of instruction dirs discovered in the launch dir)
 #       SANDBOX_HOME_FILES_BOUND (array of files placed in the private home)
+#       SANDBOX_BLIND_MASKED / SANDBOX_BLIND_SKIPPED (extra masks applied / not found)
 build_sandbox_args() {
   local image=$1 pkg_root=$2 pkg=$3 ver=$4 work=$5 out=$6 emptydir=$7
   shift 7
   local extra_blind=("$@")
 
   SANDBOX_BLINDED=0
+  SANDBOX_BLIND_SKIPPED=()
 
   # ---- 1. isolate -------------------------------------------------------------
   # -e      clean environment (the wrapper does this too)
@@ -281,10 +283,47 @@ build_sandbox_args() {
     esac
   fi
 
+  # Extra masks from two sources, both applied here in the mask section.
+  #
+  #   BLIND_PATHS (case file)  -- answer surfaces belonging to the TARGET: a notes
+  #                               archive for this package, a scratch copy of the recipe.
+  #   SANDBOX_BLIND_EXTRA      -- answer surfaces belonging to the AGENT: its own
+  #                               results/ tree of prior runs, its own test harness and
+  #                               that harness's cases/. A STRING, one path per line.
+  #
+  # The split is the agent-agnostic rule. A case file describes a package and must stay
+  # reusable against anyone's agent, so the path to one particular checkout does not
+  # belong in it -- it belongs with whoever launches that agent, next to
+  # SANDBOX_AUTOBIND_FROM and SANDBOX_HOME_COPIES. Both lists were briefly kept in the
+  # case file and it immediately hardcoded a local clone path into cases/fftw-3.3.8.env.
+  #
+  # A string, not an array, for the same reason as SANDBOX_RO_BINDS: bash arrays cannot
+  # be exported, so an array set in the caller's shell silently never arrives.
+  local extra_line
+  while IFS= read -r extra_line; do
+    [ -n "$extra_line" ] && extra_blind+=( "$extra_line" )
+  done <<< "${SANDBOX_BLIND_EXTRA:-}"
+
+  SANDBOX_BLIND_MASKED=()
   local b
   for b in "${extra_blind[@]}"; do
+    # BLIND_PATHS=() reaches here as ONE EMPTY element, because both callers normalise
+    # it with "${BLIND_PATHS[@]:-}" so that `set -u` does not trip on an empty array.
+    # Dropping empties first is what keeps the default case from reporting a phantom
+    # skipped mask -- which it did, the moment skips started being reported at all.
+    [ -n "$b" ] || continue
     # Masking a nonexistent path is a hard error, not a no-op.
-    [ -e "$b" ] && _mask "$b"
+    if [ -e "$b" ]; then
+      _mask "$b"
+      SANDBOX_BLIND_MASKED+=( "$b" )
+    else
+      # Recorded, not fatal: a case that lists a notes archive should stay usable on a
+      # host where it is absent, and SANDBOX_BLIND_EXTRA naming an agent repo that is
+      # not checked out here is normal. But a silent skip is how a typo becomes a leak
+      # nothing reports, so the gate prints these and run.meta records them -- open
+      # item 3, for the same reason, applies to SANDBOX_RO_BINDS.
+      SANDBOX_BLIND_SKIPPED+=( "$b" )
+    fi
   done
 
   SANDBOX_ARGS+=( "$image" )

@@ -74,6 +74,22 @@ if [ -n "$AB0" ]; then
   touch "$HOME/'"${AB0%%/*}"'/.probe" 2>/dev/null && { t abparent rw; rm -f "$HOME/'"${AB0%%/*}"'/.probe"; } || t abparent ro'
 fi
 
+# The extra masks -- BLIND_PATHS from the case, SANDBOX_BLIND_EXTRA from the launcher --
+# verified the same way as the target, by counting entries from inside. Without this
+# they were the one part of the blinding that was asserted only by construction: a mask
+# in the wrong section, or a path that resolves elsewhere inside the container, would
+# read as configured while leaking. Sums the counts because any nonzero total is a leak
+# and the per-path detail is one `ls` away under --shell.
+EXTRA_PROBE=""
+if [ "${#SANDBOX_BLIND_MASKED[@]}" -gt 0 ]; then
+  EXTRA_PROBE='
+  _xn=0
+  for _xp in '"$(printf '%q ' "${SANDBOX_BLIND_MASKED[@]}")"'; do
+    _xn=$((_xn + $(ls -A "$_xp" 2>/dev/null | wc -l)))
+  done
+  t extras "$_xn"'
+fi
+
 # Every probe in ONE container instance, so this tests the real composed mount set
 # rather than several different partial ones.
 out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
@@ -90,7 +106,7 @@ out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   touch "$HOME/.probe" 2>/dev/null && { t homerw rw; rm -f "$HOME/.probe"; } || t homerw ro
   t homecount "$(ls -A "$HOME" 2>/dev/null | wc -l)"
   t harness "$(ls -A "'"$HERE"'/cases" 2>/dev/null | wc -l)"
-  getent hosts github.com >/dev/null 2>&1 && t dns ok || t dns down'"$AB_PROBE"'
+  getent hosts github.com >/dev/null 2>&1 && t dns ok || t dns down'"$AB_PROBE$EXTRA_PROBE"'
 ' 2>&1)
 
 g() { sed -n "s/^$1=//p" <<<"$out"; }
@@ -112,6 +128,16 @@ if [ "$SANDBOX_BLINDED" = 1 ]; then
   # sends an agent troubleshooting a module that was never supposed to exist.
   check "target not listed by module avail" 0      "$(g listed)"
   check "loading it reports 'unknown'"      unknown "$(g loaderr)"
+fi
+if [ "${#SANDBOX_BLIND_MASKED[@]}" -gt 0 ]; then
+  check "extra masks show 0 entries (${#SANDBOX_BLIND_MASKED[@]} paths)" 0 "$(g extras)"
+fi
+# Not a failure -- an absent path is legitimate on a host that lacks it -- but printed,
+# because the alternative is a typo in BLIND_PATHS or SANDBOX_BLIND_EXTRA leaving an
+# answer surface readable with nothing said anywhere.
+if [ "${#SANDBOX_BLIND_SKIPPED[@]}" -gt 0 ]; then
+  printf '  note  %-46s %s path(s)\n' "requested mask absent, NOT applied" "${#SANDBOX_BLIND_SKIPPED[@]}"
+  for _s in "${SANDBOX_BLIND_SKIPPED[@]}"; do printf '          %s\n' "$_s"; done
 fi
 if [ -n "$PRIOR_VER" ]; then
   if [ "$(g prior)" -gt 0 ] 2>/dev/null; then

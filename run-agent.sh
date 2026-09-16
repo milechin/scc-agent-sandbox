@@ -100,6 +100,15 @@ echo "sandbox verified (see $OUT/verify.log)"
 build_sandbox_args "$IMAGE" "$PKG_ROOT" "$PKG" "$VER" "$WORK" "$OUT" "$EMPTY" \
                    "${BLIND_PATHS[@]}"
 
+# A requested mask whose source does not exist is skipped, so a typo in BLIND_PATHS or
+# SANDBOX_BLIND_EXTRA would otherwise leave an answer surface readable with nothing
+# said. Not fatal -- an absent path is legitimate on a host that lacks it -- but never
+# silent.
+if [ "${#SANDBOX_BLIND_SKIPPED[@]}" -gt 0 ]; then
+  printf 'WARNING: requested mask not applied (path does not exist): %s\n' \
+         "${SANDBOX_BLIND_SKIPPED[@]}" >&2
+fi
+
 {
   echo "case=$(basename "$CASE")"; echo "image=$IMAGE"
   echo "pkg_root=$PKG_ROOT"; echo "pkg=$PKG"; echo "ver=$VER"
@@ -109,6 +118,10 @@ build_sandbox_args "$IMAGE" "$PKG_ROOT" "$PKG" "$VER" "$WORK" "$OUT" "$EMPTY" \
   # Paths only. Never the contents -- one of these is usually a credential.
   echo "home_files=${SANDBOX_HOME_FILES_BOUND[*]:-none}"
   echo "home_copies=${HOME_COPIED[*]:-none}"
+  # Extra masks, applied and requested-but-absent. The second line is the one that
+  # matters when a report is doubted: it says which answer surface was NOT hidden.
+  echo "blind_masked=${SANDBOX_BLIND_MASKED[*]:-none}"
+  echo "blind_skipped=${SANDBOX_BLIND_SKIPPED[*]:-none}"
   echo "started=$(date -Is)"
   echo "mode=$([ "$SHELL_MODE" = 1 ] && echo interactive || echo scripted)"
   echo "agent_cmd=${AGENT_CMD:-<interactive shell>}"

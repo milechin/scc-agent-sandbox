@@ -168,12 +168,87 @@ All optional, all environment variables.
 | `SANDBOX_AUTOBIND_FROM` | look there instead of the current directory |
 | `SANDBOX_HOME_FILES` | individual files **bound** into the private home, **one `src:dst` per line**, `dst` relative to `$HOME`; how an agent gets its credential |
 | `SANDBOX_HOME_COPIES` | same syntax, but **copied** — for config the agent rewrites, such as `.claude.json` |
+| `SANDBOX_BLIND_EXTRA` | extra paths to **mask**, **one path per line** — the agent's own `results/` and test harness |
 
 `SANDBOX_RO_BINDS` is a **string, not an array** — bash arrays cannot be exported, so
 an array set in your shell silently never arrives and the binds vanish without error.
 
+### `SANDBOX_BLIND_EXTRA`: the agent's own prior runs are an answer key
+
+`$OUT` defaults to `$PWD/results/<case>-<stamp>/`, so an agent launched from its own
+repository accumulates its history there — and that directory is under `/projectnb`,
+which the site bind list sweeps in read-only. The first run is clean. Every run after
+it can read the last one's `run.meta` and `argv.txt` (both name `VER` and `PRIOR_VER`)
+and `homedir/.claude/**/*.jsonl`, the previous attempt's full transcript. The same goes
+for a second test harness in that repo and its `cases/`.
+
+`jail.sh` masks only *itself*, so nothing in this harness knows those paths. Mask them
+from the launch side, next to the other per-agent settings:
+
+```bash
+export SANDBOX_BLIND_EXTRA="$PWD/results
+$PWD/tests"
+./run-agent.sh /path/to/scc-agent-sandbox/cases/fftw-3.3.8.env --shell \
+    --out /projectnb/dvm-rcs/temp/runs/fftw-3.3.8-$(date +%Y%m%d-%H%M%S)
+```
+
+**`--out` must then live outside the masked tree.** The run directory is bound back
+over a mask only when it sits under this harness (`SANDBOX_SELF_DIR`), so a `$OUT`
+inside `$PWD/results` would be masked along with the rest and the workspace would come
+back read-only. That fails loudly — the gate's "workspace is writable" check flips to
+`ro` and the run refuses to start — but the fix is to put `--out` elsewhere, as above.
+
+Why this is an environment variable and not `BLIND_PATHS` in the case file: a case
+describes a *package* and has to stay reusable against anyone's agent, so one
+particular checkout's path does not belong in it. `BLIND_PATHS` is for answer surfaces
+belonging to the **target** (a notes archive about fftw, a scratch copy of the recipe);
+`SANDBOX_BLIND_EXTRA` is for ones belonging to the **agent**.
+
+A mask whose source does not exist is skipped, since an absent path is legitimate on a
+host that lacks it — but never silently: the gate prints `requested mask absent, NOT
+applied`, `run-agent.sh` warns, and `run.meta` records `blind_masked` and
+`blind_skipped`. The gate also counts entries inside every applied mask, so these are
+verified from within the container rather than trusted by construction.
+
 **Where an agent finds its instructions — the automatic version.** Run from a directory
 containing a `.claude/`, and each populated subdirectory of it is mounted read-only at
+### `SANDBOX_BLIND_EXTRA`: the agent's own prior runs are an answer key
+
+`$OUT` defaults to `$PWD/results/<case>-<stamp>/`, so an agent launched from its own
+repository accumulates its history there — and that directory is under `/projectnb`,
+which the site bind list sweeps in read-only. The first run is clean. Every run after
+it can read the last one's `run.meta` and `argv.txt` (both name `VER` and `PRIOR_VER`)
+and `homedir/.claude/**/*.jsonl`, the previous attempt's full transcript. The same goes
+for a second test harness in that repo and its `cases/`.
+
+`jail.sh` masks only *itself*, so nothing in this harness knows those paths. Mask them
+from the launch side, next to the other per-agent settings:
+
+```bash
+export SANDBOX_BLIND_EXTRA="$PWD/results
+$PWD/tests"
+./run-agent.sh /path/to/scc-agent-sandbox/cases/fftw-3.3.8.env --shell \
+    --out /projectnb/dvm-rcs/temp/runs/fftw-3.3.8-$(date +%Y%m%d-%H%M%S)
+```
+
+**`--out` must then live outside the masked tree.** The run directory is bound back
+over a mask only when it sits under this harness (`SANDBOX_SELF_DIR`), so a `$OUT`
+inside `$PWD/results` would be masked along with the rest and the workspace would come
+back read-only. That fails loudly — the gate's "workspace is writable" check flips to
+`ro` and the run refuses to start — but the fix is to put `--out` elsewhere, as above.
+
+Why this is an environment variable and not `BLIND_PATHS` in the case file: a case
+describes a *package* and has to stay reusable against anyone's agent, so one
+particular checkout's path does not belong in it. `BLIND_PATHS` is for answer surfaces
+belonging to the **target** (a notes archive about fftw, a scratch copy of the recipe);
+`SANDBOX_BLIND_EXTRA` is for ones belonging to the **agent**.
+
+A mask whose source does not exist is skipped, since an absent path is legitimate on a
+host that lacks it — but never silently: the gate prints `requested mask absent, NOT
+applied`, `run-agent.sh` warns, and `run.meta` records `blind_masked` and
+`blind_skipped`. The gate also counts entries inside every applied mask, so these are
+verified from within the container rather than trusted by construction.
+
 the matching place under the private `$HOME`:
 
 ```
