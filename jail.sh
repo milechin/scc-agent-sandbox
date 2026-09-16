@@ -54,6 +54,7 @@ SANDBOX_RO_DIRS=(
 #       SANDBOX_AUTOBOUND (array of instruction dirs discovered in the launch dir)
 #       SANDBOX_HOME_FILES_BOUND (array of files placed in the private home)
 #       SANDBOX_BLIND_MASKED / SANDBOX_BLIND_SKIPPED (extra masks applied / not found)
+#       SANDBOX_BATCH_BLOCKED (1 = SGE masked, 0 = SANDBOX_ALLOW_BATCH escape hatch)
 build_sandbox_args() {
   local image=$1 pkg_root=$2 pkg=$3 ver=$4 work=$5 out=$6 emptydir=$7
   shift 7
@@ -89,9 +90,25 @@ build_sandbox_args() {
   [ -n "${TMPDIR:-}" ] && SANDBOX_ENV+=( "SINGULARITYENV_TMPDIR=$TMPDIR" )
 
   # ---- 2. read-only data ------------------------------------------------------
+  # MASKING CANNOT UNDO A BIND WITH THE SAME DESTINATION, only one nested under it.
+  # Measured on singularity-ce 4.5.0, all four variants, target /var/spool/sge:
+  #
+  #   site bind then mask (same dst)   -> 1 entry   the mask is SILENTLY DROPPED
+  #   mask then site bind (same dst)   -> 0 entries the first bind wins
+  #   mask alone                       -> 0 entries
+  #   neither                          -> 0 entries the image's own dir is empty
+  #
+  # So for an IDENTICAL destination the FIRST bind wins -- the reverse of the
+  # parent/child rule in the header, where the LAST wins. Anything in this list that
+  # has to be hidden must therefore be dropped HERE; appending a mask in section 7
+  # looks right, changes nothing, and reports nothing. That is how the SGE spool sat
+  # readable while the gate said the mask was configured.
   local d
   for d in "${SANDBOX_RO_DIRS[@]}"; do
-    [ -d "$d" ] && SANDBOX_ARGS+=( --bind "$d:$d:ro" )
+    [ -d "$d" ] || continue
+    # The batch spool is the one entry hiding it needs, and only when blocking batch.
+    if [ -z "${SANDBOX_ALLOW_BATCH:-}" ] && [ "$d" = /var/spool/sge ]; then continue; fi
+    SANDBOX_ARGS+=( --bind "$d:$d:ro" )
   done
   [ -f /var/lib/dbus/machine-id ] && \
     SANDBOX_ARGS+=( --bind /var/lib/dbus/machine-id:/var/lib/dbus/machine-id:ro )
@@ -281,6 +298,66 @@ build_sandbox_args() {
     case "$out" in
       "$SANDBOX_SELF_DIR"/*) SANDBOX_ARGS+=( --bind "$out:$out" ) ;;
     esac
+  fi
+
+  # ---- BATCH SYSTEM: the one escape the write scope does not cover -------------
+  # Everything above confines what the agent can do INSIDE the container. A batch job
+  # is different in kind: qsub hands work to the scheduler, which runs it ON THE HOST
+  # as the invoking user, outside every bind and every mask. Measured from inside the
+  # pilot: qsub/qrsh/qlogin/qmod/qdel are all on PATH from /usr/local/bin, and `id -un`
+  # is the real user. A job would therefore have write access to /share and an
+  # UNMASKED view of the blinded version -- it breaks containment and blinding at once.
+  #
+  # Masking SGE_ROOT and omitting the spool is what stops it: every client reads its
+  # cell configuration from there to find the qmaster, so with those gone there is
+  # nothing to submit to, whatever is on PATH. On the SCC it goes further than intended
+  # and that is worth knowing rather than relying on: /usr/local/bin/qsub is a symlink
+  # into the SGE root, so masking the root dangles every client and qsub/qrsh/qlogin
+  # leave PATH entirely ("command not found", measured). On an image where they are
+  # real files the mask is still the mechanism -- do not treat the missing binary as
+  # the protection.
+  #
+  # Env-based blocking (dropping SGE_ROOT) is not enough on its own: the container's
+  # own /etc/profile.d sets it again, measured as SGE_ROOT=/usr/local/sge/sge_root
+  # inside a -e --contain run.
+  #
+  # HONEST LIMIT, do not read the gate as more than it says: on the CentOS 7 pilot the
+  # clients ALREADY fail with `libssl.so.1.1: cannot open shared object file` -- alma8
+  # binaries against CentOS 7 libraries, the same accident as the nested-Singularity
+  # libsubid.so.3 finding. So this image cannot demonstrate that the mask is what
+  # blocks submission; it can only show the mask is in place. Retest on the alma8
+  # image, where the clients are expected to run, before trusting the block itself.
+  #
+  # SANDBOX_ALLOW_BATCH=1 removes the mask, for the case where submission is the very
+  # behaviour under test. A run with it set is NOT contained and NOT blinded: the agent
+  # can reach the host. run.meta records it and the gate says so loudly.
+  if [ -z "${SANDBOX_ALLOW_BATCH:-}" ]; then
+    SANDBOX_BATCH_BLOCKED=1
+    # SGE_ROOT is /usr/local/sge/sge_root on the SCC; mask the parent so the cell, the
+    # settings files and the CA directories all go with it.
+    #
+    # RESOLVE FIRST. /usr/local/sge is a SYMLINK (-> ogs-ge2011.11.p1, since 2013), and
+    # binding a directory over a symlink does not shadow it -- it aborts the whole run:
+    #   FATAL: container creation failed: mount .../m3->/usr/local/sge error: ...
+    #          could not mount ...: not a directory
+    # Masking the resolved directory works and the symlink then points into the mask,
+    # so the client sees an empty SGE_ROOT either way. Measured both ways.
+    #
+    # /share/sge is deliberately not here: mode 700 root-owned, so it is unreadable to
+    # the user with or without a mask.
+    # Children of /usr/local, so masking works here. /var/spool/sge is NOT in this
+    # list: it is its own bind destination in section 2 and a mask over it is dropped,
+    # so it is omitted there instead.
+    local sd sd_real
+    for sd in /usr/local/sge /usr/local/sgeCA; do
+      sd_real=$(readlink -f "$sd" 2>/dev/null) || continue
+      [ -n "$sd_real" ] && [ -d "$sd_real" ] && _mask "$sd_real"
+    done
+    # Belt and braces, and it documents intent in argv.txt: point the clients nowhere
+    # even if a future image resolves SGE_ROOT differently.
+    SANDBOX_ENV+=( "SINGULARITYENV_SGE_ROOT=/nonexistent" )
+  else
+    SANDBOX_BATCH_BLOCKED=0
   fi
 
   # Extra masks from two sources, both applied here in the mask section.

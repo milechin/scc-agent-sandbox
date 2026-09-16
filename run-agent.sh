@@ -109,6 +109,14 @@ if [ "${#SANDBOX_BLIND_SKIPPED[@]}" -gt 0 ]; then
          "${SANDBOX_BLIND_SKIPPED[@]}" >&2
 fi
 
+# The batch escape hatch is loud on purpose: it is the only setting here that lets the
+# agent reach outside the jail, and a run made with it set is not a blinded run.
+if [ "$SANDBOX_BATCH_BLOCKED" = 0 ]; then
+  echo "WARNING: SANDBOX_ALLOW_BATCH is set — batch submission is REACHABLE." >&2
+  echo "         A submitted job runs on the host as ${USER:-$(id -un)}, outside every" >&2
+  echo "         mask: it can write /share and read the blinded version." >&2
+fi
+
 {
   echo "case=$(basename "$CASE")"; echo "image=$IMAGE"
   echo "pkg_root=$PKG_ROOT"; echo "pkg=$PKG"; echo "ver=$VER"
@@ -122,6 +130,9 @@ fi
   # matters when a report is doubted: it says which answer surface was NOT hidden.
   echo "blind_masked=${SANDBOX_BLIND_MASKED[*]:-none}"
   echo "blind_skipped=${SANDBOX_BLIND_SKIPPED[*]:-none}"
+  # 0 means a submitted job could run on the host, outside every mask. A report from
+  # such a run cannot claim the agent was confined or blinded.
+  echo "batch_blocked=$SANDBOX_BATCH_BLOCKED"
   echo "started=$(date -Is)"
   echo "mode=$([ "$SHELL_MODE" = 1 ] && echo interactive || echo scripted)"
   echo "agent_cmd=${AGENT_CMD:-<interactive shell>}"
@@ -141,6 +152,7 @@ if [ "$SHELL_MODE" = 1 ]; then
    blinded    $PKG_ROOT/$PKG/$VER $([ "$SANDBOX_BLINDED" = 1 ] && echo "(masked, 0 entries)" || echo "(NOT present — nothing masked)")
    workspace  $WORK            <- the only writable path
    state      $OUT/homedir     <- \$HOME inside; anything the agent writes there survives$([ -n "${SANDBOX_CAPTURE_AT:-}" ] && printf '\n   capture    %s <- bound at %s' "$OUT/home" "$SANDBOX_CAPTURE_AT")
+   batch      $([ "$SANDBOX_BATCH_BLOCKED" = 1 ] && echo "blocked (SGE_ROOT masked, spool unbound)" || echo "REACHABLE — SANDBOX_ALLOW_BATCH is set; jobs escape the jail")
    read-only  /share, /usr/local, and the rest of the site bind list$([ "${#SANDBOX_AUTOBOUND[@]}" -gt 0 ] && printf '\n   agent dirs %s <- found in %s, mounted under $HOME' "${SANDBOX_AUTOBOUND[*]}" "$PWD")
 
    Everything outside the workspace is read-only. Type 'exit' to leave; the workspace

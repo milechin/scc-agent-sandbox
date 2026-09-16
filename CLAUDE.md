@@ -114,6 +114,12 @@ These came out of building it, usually the hard way.
   Singularity looked like a setuid problem (it was a missing library); a shared
   "empty" mask directory looked empty (it was not, once a nested mount point was
   materialised in it).
+- **Masking is not subtraction.** A mask only shadows a path *nested under* a bound
+  one. Against an identical destination Singularity keeps the FIRST bind and drops the
+  later one silently, so anything in `SANDBOX_RO_DIRS` that must be hidden has to be
+  omitted from that list instead — measured four ways when the SGE spool stayed
+  readable with a mask sitting in the argv doing nothing. Before adding a mask, check
+  whether its target is its own bind destination.
 - **A gate that cannot fail proves nothing.** `verify-sandbox.sh` builds a
   deliberately mis-ordered argv and asserts it *fails* to blind. Any new check should
   be able to answer "would this fire if the thing it guards broke?" — twice a check
@@ -135,14 +141,21 @@ These came out of building it, usually the hard way.
    honestly but cannot test an agent whose references describe alma8 and
    `/share/pkg.8`. When that image exists, a case only needs `IMAGE=` and
    `PKG_ROOT=/share/pkg.8` changed.
-2. **Container-in-container is unresolved, not disproven.** Nested Singularity failed
+2. **The batch block needs alma8 to be proven.** `qsub` is a host escape — a job runs
+   outside every mask, so it breaks containment and blinding together — and `jail.sh`
+   now masks `SGE_ROOT` and omits the spool. But on the CentOS 7 pilot the SGE clients
+   already fail with `libssl.so.1.1: cannot open shared object file`, so the gate
+   asserts the mask is in place and cannot assert that a live `qsub` is refused. Same
+   alma8-binary-on-CentOS-7 accident as item 3. Retest there; until then the block is
+   configuration, not a measured guarantee.
+3. **Container-in-container is unresolved, not disproven.** Nested Singularity failed
    in the pilot with `libsubid.so.3: cannot open shared object file` — an alma8 binary
    against CentOS 7 libraries, *not* the setuid restriction that blocks containers
    under bwrap. `starter-suid` is setuid on the host. Retest on the alma8 image before
    concluding either way; it is the main capability this backend might add.
-3. **`SANDBOX_RO_BINDS` is unchecked.** Optional and per-agent, so a typo in a source
+4. **`SANDBOX_RO_BINDS` is unchecked.** Optional and per-agent, so a typo in a source
    path fails silently. An assertion that each `src` exists would be cheap.
-4. **BU-specific by construction.** The site bind list, `/share/pkg.N`, and the image
+5. **BU-specific by construction.** The site bind list, `/share/pkg.N`, and the image
    path are baked into `jail.sh`. Fine for RCS; if outside contributors are wanted,
    those want to become configuration — easier before people fork it.
 

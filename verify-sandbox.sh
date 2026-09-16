@@ -106,7 +106,14 @@ out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   touch "$HOME/.probe" 2>/dev/null && { t homerw rw; rm -f "$HOME/.probe"; } || t homerw ro
   t homecount "$(ls -A "$HOME" 2>/dev/null | wc -l)"
   t harness "$(ls -A "'"$HERE"'/cases" 2>/dev/null | wc -l)"
-  getent hosts github.com >/dev/null 2>&1 && t dns ok || t dns down'"$AB_PROBE$EXTRA_PROBE"'
+  getent hosts github.com >/dev/null 2>&1 && t dns ok || t dns down
+  t sgeroot "$(ls -A /usr/local/sge 2>/dev/null | wc -l)"
+  t sgespool "$(ls -A /var/spool/sge 2>/dev/null | wc -l)"
+  t qsubpath "$(command -v qsub >/dev/null 2>&1 && echo present || echo absent)"
+  # Informational only, and deliberately a no-op submission: -verify makes qsub check
+  # and print rather than queue anything. On the pilot this cannot even load its
+  # libraries, which is why the CHECKS below assert the mask, not the outcome.
+  t qsubrun "$(qsub -verify -b y /bin/true 2>&1 | tr "\n" " " | cut -c1-60)"'"$AB_PROBE$EXTRA_PROBE"'
 ' 2>&1)
 
 g() { sed -n "s/^$1=//p" <<<"$out"; }
@@ -145,6 +152,30 @@ if [ -n "$PRIOR_VER" ]; then
   else
     printf '  FAIL  %-46s unreadable\n' "prior version $PRIOR_VER readable"; fail=$((fail+1))
   fi
+fi
+
+echo "  --- batch system (host escape) ---"
+# A batch job runs on the HOST as the real user, outside every bind and every mask, so
+# it is the one path that defeats both the write scope and the blinding at once. These
+# checks assert the MASK is in place; they deliberately do not assert that submission
+# fails, because on the CentOS 7 pilot the SGE clients cannot load their libraries
+# either way and a check whose subject is already broken proves nothing. What they do
+# catch is the mask going missing -- which is the thing that will matter on alma8.
+if [ "$SANDBOX_BATCH_BLOCKED" = 1 ]; then
+  check "SGE_ROOT masked (0 entries)"       0        "$(g sgeroot)"
+  check "SGE spool masked (0 entries)"      0        "$(g sgespool)"
+  # Recorded, not asserted. /usr/local/bin/qsub is a SYMLINK into the SGE root
+  # (-> /usr/local/ogs-ge2011.11.p1/bin/qsub), so masking the root dangles every client
+  # and they leave PATH as well -- "absent" here, and "command not found" below. That is
+  # a consequence of the mask, not a second mechanism, which is why it is a note: on an
+  # image where the clients are real files it would read "present" and the mask would
+  # still be the thing doing the work.
+  printf '  note  %-46s %s\n' "qsub on PATH" "$(g qsubpath)"
+  printf '  note  %-46s %s\n' "qsub -verify says" "$(g qsubrun)"
+else
+  printf '  WARN  %-46s %s\n' "BATCH SUBMISSION ALLOWED" "SANDBOX_ALLOW_BATCH is set"
+  printf '        %s\n' "This run is NOT contained and NOT blinded: a submitted job runs on" \
+                         "the host as $USER, can write /share, and sees the unmasked target."
 fi
 
 echo "  --- home isolation ---"

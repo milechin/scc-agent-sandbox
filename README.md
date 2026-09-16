@@ -169,6 +169,7 @@ All optional, all environment variables.
 | `SANDBOX_HOME_FILES` | individual files **bound** into the private home, **one `src:dst` per line**, `dst` relative to `$HOME`; how an agent gets its credential |
 | `SANDBOX_HOME_COPIES` | same syntax, but **copied** — for config the agent rewrites, such as `.claude.json` |
 | `SANDBOX_BLIND_EXTRA` | extra paths to **mask**, **one path per line** — the agent's own `results/` and test harness |
+| `SANDBOX_ALLOW_BATCH=1` | **removes the batch-system block.** A submitted job runs on the host, outside every mask — such a run is neither contained nor blinded |
 
 `SANDBOX_RO_BINDS` is a **string, not an array** — bash arrays cannot be exported, so
 an array set in your shell silently never arrives and the binds vanish without error.
@@ -322,6 +323,7 @@ They are then found from any cwd, leaving the writable workspace free to work in
 | `$HOME` | private per-run directory, writable, isolated from the real one |
 | this harness (`cases/`, `results/`) | masked — the answer key is not readable |
 | the workspace | the only writable path |
+| batch submission | blocked — `SGE_ROOT` masked, spool unbound, clients dangle |
 
 The one deliberate hole: a file placed with `SANDBOX_HOME_FILES` is bound read-write,
 so writes to it reach the real file outside. That is what lets a credential refresh,
@@ -355,6 +357,31 @@ Reversed, the parent overlays the mask and the target is fully readable, with no
 error, warning or exit code. `verify-sandbox.sh` builds a deliberately mis-ordered
 argv and asserts it **fails** to blind; a check that only ever sees the correct order
 cannot tell a working mask from an unnecessary one.
+
+**Masking undoes a bind nested under another, never one with the same destination.**
+Measured four ways on target `/var/spool/sge`: site bind then mask → **1 entry, the
+mask silently dropped**; mask then site bind → 0; mask alone → 0; neither → 0. So for
+an *identical* destination the **first** bind wins, the exact reverse of the
+parent/child rule above. Anything in the site list that must be hidden is therefore
+**omitted from that list**, not masked later — appending a mask looks right, changes
+nothing, and reports nothing. That is how the SGE spool stayed readable while the gate
+said the mask was configured.
+
+**Batch submission is a host escape, and the pilot hides it.** `qsub` hands work to the
+scheduler, which runs it **on the host as the real user**, outside every bind and every
+mask — it can write `/share` and read the unmasked target, defeating containment and
+blinding at once. `jail.sh` masks `SGE_ROOT` (resolving the `/usr/local/sge` symlink
+first — binding a directory over a symlink aborts the run with `not a directory`) and
+omits the spool from the site list. On the SCC that also dangles `/usr/local/bin/qsub`,
+which is a symlink into the SGE root, so the clients leave `PATH` entirely.
+
+Do not read the pilot as proof the block works: the SGE clients there are alma8
+binaries that already fail with `libssl.so.1.1: cannot open shared object file`, the
+same accident as the nested-Singularity finding. The gate therefore asserts the *mask*,
+not the outcome, and this needs retesting on the alma8 image where the clients run.
+`SANDBOX_ALLOW_BATCH=1` lifts the block for the case where submission is the behaviour
+under test; the gate prints `WARN BATCH SUBMISSION ALLOWED` and `run.meta` records
+`batch_blocked=0`.
 
 **A bind is read-write by default.** `:ro` is what makes it read-only. The site
 wrapper `scc-singularity` generates every bind read-write — right for interactive
@@ -409,6 +436,9 @@ gets a clean answer.
   `libsubid.so.3: cannot open shared object file` — an alma8 binary against CentOS 7
   libraries, *not* the setuid restriction that blocks containers under `bwrap`. The
   host `starter-suid` is setuid, so retest on the alma8 image before concluding.
+- **The batch block is asserted, not demonstrated.** The SGE clients cannot load their
+  libraries on the CentOS 7 pilot, so the gate can only show `SGE_ROOT` and the spool
+  are empty, never that a live `qsub` is refused. Retest on alma8.
 - **The pilot image is CentOS 7.** Good for exercising the jail and `pkg.7` installs;
   alma8 work needs the alma8 image. An agent whose references describe alma8 and
   `/share/pkg.8` will disagree with what it sees inside.
