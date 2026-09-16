@@ -46,11 +46,47 @@ PKG_ROOT=${PKG_ROOT:-/share/pkg.8}
 BLIND_PATHS=("${BLIND_PATHS[@]:-}")
 
 STAMP=$(date +%Y%m%d-%H%M%S)
-OUT=${OUT:-$HERE/results/$(basename "$CASE" .env)-$STAMP}
+# Results land in the CURRENT directory, not in the clone. The harness is a mechanism,
+# not a data store: cloning it somewhere shared and collecting runs next to whatever
+# you are actually working on keeps the two separate, and keeps `git status` clean.
+# Run from inside the clone and you get the old behaviour, results/ being .gitignored.
+#
+# Either location is safe. jail.sh masks its own directory, and binds $OUT back only
+# when $OUT is underneath it -- so a run directory in the clone is restored, and one
+# outside is never masked in the first place. The workspace is bound explicitly in
+# both cases, so a cwd outside the site bind list still works.
+OUT=${OUT:-$PWD/results/$(basename "$CASE" .env)-$STAMP}
 WORK=${WORK:-$OUT/work}
 mkdir -p "$WORK" "$OUT/workdir" "$OUT/home" "$OUT/homedir" || exit 1
 # Mask source: mode 755 and OUTSIDE the harness tree -- see jail.sh for why.
 EMPTY=$(mktemp -d "${TMPDIR:-/tmp}/agent-sandbox-mask.XXXXXX") || exit 1
+
+# SANDBOX_HOME_COPIES: files COPIED into the private home before launch, "src:dst" per
+# line, dst relative to the private home. The counterpart to SANDBOX_HOME_FILES, which
+# binds -- and the difference matters:
+#
+#   bind  a credential. It stays in the real home, nothing is left in the run
+#         directory, and a refreshed token writes back through.
+#   copy  a config file the agent REWRITES. Claude Code rewrites ~/.claude.json on
+#         almost every action, so a read-write bind would push sandbox state into the
+#         real config (78 KB of project history, in the measured case), and its atomic
+#         save would fail against a mount point anyway.
+#
+# Why an agent needs this at all: the private home is empty, so an interactive agent
+# re-runs first-time setup on every run. For Claude Code that is the theme picker, the
+# login prompt, and then the folder-trust dialog -- all of it state in ~/.claude.json,
+# NOT in the credential file. `claude -p` skips all three, which is why a scripted run
+# can work while an interactive one still asks to authenticate. tools/claude-home.sh
+# builds a minimal seed; see the README.
+HOME_COPIED=()
+while IFS= read -r _cf; do
+  [ -n "$_cf" ] || continue
+  _src=${_cf%%:*}; _dst=${_cf#*:}; _dst=${_dst#/}
+  [ -f "$_src" ] || { echo "SANDBOX_HOME_COPIES: no such file: $_src" >&2; continue; }
+  mkdir -p "$(dirname "$OUT/homedir/$_dst")" || exit 1
+  cp -p "$_src" "$OUT/homedir/$_dst" || exit 1   # -p keeps the mode; these are secrets
+  HOME_COPIED+=( "$_dst" )
+done <<< "${SANDBOX_HOME_COPIES:-}"
 
 # GATE FIRST. A run against a broken jail is worse than no run: it can write to
 # production, or read the answer while the report calls it blinded.
@@ -64,11 +100,39 @@ echo "sandbox verified (see $OUT/verify.log)"
 build_sandbox_args "$IMAGE" "$PKG_ROOT" "$PKG" "$VER" "$WORK" "$OUT" "$EMPTY" \
                    "${BLIND_PATHS[@]}"
 
+# A requested mask whose source does not exist is skipped, so a typo in BLIND_PATHS or
+# SANDBOX_BLIND_EXTRA would otherwise leave an answer surface readable with nothing
+# said. Not fatal -- an absent path is legitimate on a host that lacks it -- but never
+# silent.
+if [ "${#SANDBOX_BLIND_SKIPPED[@]}" -gt 0 ]; then
+  printf 'WARNING: requested mask not applied (path does not exist): %s\n' \
+         "${SANDBOX_BLIND_SKIPPED[@]}" >&2
+fi
+
+# The batch escape hatch is loud on purpose: it is the only setting here that lets the
+# agent reach outside the jail, and a run made with it set is not a blinded run.
+if [ "$SANDBOX_BATCH_BLOCKED" = 0 ]; then
+  echo "WARNING: SANDBOX_ALLOW_BATCH is set — batch submission is REACHABLE." >&2
+  echo "         A submitted job runs on the host as ${USER:-$(id -un)}, outside every" >&2
+  echo "         mask: it can write /share and read the blinded version." >&2
+fi
+
 {
   echo "case=$(basename "$CASE")"; echo "image=$IMAGE"
   echo "pkg_root=$PKG_ROOT"; echo "pkg=$PKG"; echo "ver=$VER"
   echo "prior_ver=${PRIOR_VER:-}"; echo "blinded=$SANDBOX_BLINDED"
   echo "host=$(hostname)"; echo "nslots=${NSLOTS:-unset}"
+  echo "cwd=$PWD"; echo "autobound=${SANDBOX_AUTOBOUND[*]:-none}"
+  # Paths only. Never the contents -- one of these is usually a credential.
+  echo "home_files=${SANDBOX_HOME_FILES_BOUND[*]:-none}"
+  echo "home_copies=${HOME_COPIED[*]:-none}"
+  # Extra masks, applied and requested-but-absent. The second line is the one that
+  # matters when a report is doubted: it says which answer surface was NOT hidden.
+  echo "blind_masked=${SANDBOX_BLIND_MASKED[*]:-none}"
+  echo "blind_skipped=${SANDBOX_BLIND_SKIPPED[*]:-none}"
+  # 0 means a submitted job could run on the host, outside every mask. A report from
+  # such a run cannot claim the agent was confined or blinded.
+  echo "batch_blocked=$SANDBOX_BATCH_BLOCKED"
   echo "started=$(date -Is)"
   echo "mode=$([ "$SHELL_MODE" = 1 ] && echo interactive || echo scripted)"
   echo "agent_cmd=${AGENT_CMD:-<interactive shell>}"
@@ -88,7 +152,8 @@ if [ "$SHELL_MODE" = 1 ]; then
    blinded    $PKG_ROOT/$PKG/$VER $([ "$SANDBOX_BLINDED" = 1 ] && echo "(masked, 0 entries)" || echo "(NOT present — nothing masked)")
    workspace  $WORK            <- the only writable path
    state      $OUT/homedir     <- \$HOME inside; anything the agent writes there survives$([ -n "${SANDBOX_CAPTURE_AT:-}" ] && printf '\n   capture    %s <- bound at %s' "$OUT/home" "$SANDBOX_CAPTURE_AT")
-   read-only  /share, /usr/local, and the rest of the site bind list
+   batch      $([ "$SANDBOX_BATCH_BLOCKED" = 1 ] && echo "blocked (SGE_ROOT masked, spool unbound)" || echo "REACHABLE — SANDBOX_ALLOW_BATCH is set; jobs escape the jail")
+   read-only  /share, /usr/local, and the rest of the site bind list$([ "${#SANDBOX_AUTOBOUND[@]}" -gt 0 ] && printf '\n   agent dirs %s <- found in %s, mounted under $HOME' "${SANDBOX_AUTOBOUND[*]}" "$PWD")
 
    Everything outside the workspace is read-only. Type 'exit' to leave; the workspace
    and state directories above survive.

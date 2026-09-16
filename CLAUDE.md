@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # scc-agent-sandbox
 
 A Singularity jail for evaluating **software-install agents** on the BU SCC. Run an
@@ -16,6 +20,90 @@ and reference that context. That repo keeps its own **bwrap**-based harness unde
 `tests/`, which is specific to one skill and its references; this one is deliberately
 agent-agnostic and was never meant to replace it.
 
+## Architecture
+
+Three bash files and a case file. No build, no dependency install, no test framework —
+everything runs from a compute node with `$NSLOTS` set.
+
+- **`jail.sh`** — the only place that composes an argv. Sourced (not executed) by both
+  other scripts, so verification and running use literally the same mounts; if they
+  diverge, the gate stops proving anything about the run. `build_sandbox_args` fills
+  three globals: `SANDBOX_ARGS` (the `singularity exec …` argv, image last),
+  `SANDBOX_ENV` (`SINGULARITYENV_*` pairs passed via `env`), `SANDBOX_BLINDED`.
+  Its second function, `build_sandbox_args_misordered`, exists solely as the gate's
+  negative control.
+- **`verify-sandbox.sh`** — the gate. Runs every probe inside *one* container instance
+  so it tests the real composed mount set, then re-runs the mis-ordered argv and
+  asserts the target **leaks**. Exit non-zero means do not run an agent.
+- **`run-agent.sh`** — invokes the gate first and refuses to start if it fails, then
+  execs the same jail with either `/bin/bash -l` (`--shell`) or `-lc "$AGENT_CMD"`.
+- **`cases/*.env`** — sourced shell: `IMAGE`, `PKG_ROOT`, `PKG`, `VER`, `PRIOR_VER`,
+  optional `EXPECT_BIN` and `BLIND_PATHS=()`.
+
+**Bind order is the entire security model.** Singularity has no `--exclude`; hiding a
+child of a bound parent means binding an empty directory over it, and the mask must be
+appended *after* the parent or it silently does nothing. Hence the section numbering in
+`build_sandbox_args`: 1 isolate → 2 read-only site dirs → 3 private `$HOME` over them →
+4 workspace → 5 scratch → 6 agent runtime and `SANDBOX_RO_BINDS` → **7 masks, last**.
+Any new bind must be placed by asking whether it should shadow or be shadowed.
+
+Two consequences that are easy to break:
+
+- Each mask gets its **own** directory under `$emptydir` (`_mask` numbers them). A
+  shared source stops being empty as soon as anything is bound back inside a masked
+  path, and the stray entry then appears in every other mask.
+- The harness masks **itself** (`SANDBOX_SELF_DIR`) because the site bind list sweeps
+  in `/projectnb`, `/usr1`, `/project`; the current run's `$OUT` is bound back on top
+  so the agent sees its own run and no other. `$emptydir` must therefore be mode 755
+  and live outside the harness tree.
+
+Section 6 also **auto-discovers** an agent's instruction directory in the launch
+directory (`SANDBOX_AUTOBIND_DIRS`, default `.claude`) and binds each populated
+subdirectory under the private `$HOME`. Subdirectories only: binding the config parent
+read-only would stop the agent writing its own state, which is the transcript you were
+trying to collect. Keeping the mechanism generic and the agent name in a default value
+is what keeps it inside the agent-agnostic rule — do not grow agent-specific logic
+around it.
+
+`SANDBOX_HOME_FILES` binds individual files into the private home, opt-in with no
+default because the case it exists for is a credential. Bound rather than copied so no
+live token lands in a run directory; read-write so token refresh works, which is also
+the only write path from the jail back into the real home. Measured: an in-place write
+to a bind-mounted file reaches the host, an atomic rename over it does not.
+
+`SANDBOX_HOME_COPIES` is the copy counterpart, for config the agent **rewrites**. The
+split is load-bearing and was found the hard way: binding only the credential still
+left interactive Claude Code at a login screen, because onboarding and folder-trust
+state live in `~/.claude.json`, not in `.credentials.json` — and `claude -p` skips
+both, so scripted runs looked fine. That file must be copied, not bound: it grew from
+1.3 KB to 42 KB during one short run, all of which a read-write bind would have
+written into the real config. `tools/claude-home.sh` builds a minimal seed and is
+deliberately outside the agent-agnostic core.
+
+`$OUT` defaults to `$PWD/results/<case>-<stamp>/`, not the clone: the harness is a
+mechanism, not a data store. The gate still verifies with `$OUT` under the harness
+directory on purpose — that is the nested layout where the run directory is restored
+inside the harness mask, strictly harder than the un-nested default and still live
+whenever anyone runs from the clone. Do not "align" it to `$PWD`.
+
+The run directory holds `work/` (the only writable path), `homedir/` (`$HOME`
+inside), `run.meta`, `argv.txt` (the exact argv, for auditing a disputed run),
+`verify.log`, and `agent.stdout`/`.stderr` for scripted runs.
+
+## Commands
+
+```bash
+./verify-sandbox.sh cases/fftw-3.3.8.env                  # the gate — after ANY jail.sh change
+./run-agent.sh      cases/fftw-3.3.8.env --shell          # interactive, inside the jail
+./run-agent.sh      cases/fftw-3.3.8.env --agent-cmd '…'  # scripted; output captured to $OUT
+SANDBOX_VERBOSE=1 ./verify-sandbox.sh cases/…             # restore Singularity INFO/WARNING
+shellcheck jail.sh run-agent.sh verify-sandbox.sh         # sources carry shellcheck directives; not installed by default
+```
+
+There is no single-test runner: the gate is one script and prints per-check `ok`/`FAIL`
+lines. To iterate on one check, edit the probe block in `verify-sandbox.sh` — all probes
+share one container invocation on purpose.
+
 ## Working agreements
 
 These came out of building it, usually the hard way.
@@ -26,6 +114,12 @@ These came out of building it, usually the hard way.
   Singularity looked like a setuid problem (it was a missing library); a shared
   "empty" mask directory looked empty (it was not, once a nested mount point was
   materialised in it).
+- **Masking is not subtraction.** A mask only shadows a path *nested under* a bound
+  one. Against an identical destination Singularity keeps the FIRST bind and drops the
+  later one silently, so anything in `SANDBOX_RO_DIRS` that must be hidden has to be
+  omitted from that list instead — measured four ways when the SGE spool stayed
+  readable with a mask sitting in the argv doing nothing. Before adding a mask, check
+  whether its target is its own bind destination.
 - **A gate that cannot fail proves nothing.** `verify-sandbox.sh` builds a
   deliberately mis-ordered argv and asserts it *fails* to blind. Any new check should
   be able to answer "would this fire if the thing it guards broke?" — twice a check
@@ -47,14 +141,21 @@ These came out of building it, usually the hard way.
    honestly but cannot test an agent whose references describe alma8 and
    `/share/pkg.8`. When that image exists, a case only needs `IMAGE=` and
    `PKG_ROOT=/share/pkg.8` changed.
-2. **Container-in-container is unresolved, not disproven.** Nested Singularity failed
+2. **The batch block needs alma8 to be proven.** `qsub` is a host escape — a job runs
+   outside every mask, so it breaks containment and blinding together — and `jail.sh`
+   now masks `SGE_ROOT` and omits the spool. But on the CentOS 7 pilot the SGE clients
+   already fail with `libssl.so.1.1: cannot open shared object file`, so the gate
+   asserts the mask is in place and cannot assert that a live `qsub` is refused. Same
+   alma8-binary-on-CentOS-7 accident as item 3. Retest there; until then the block is
+   configuration, not a measured guarantee.
+3. **Container-in-container is unresolved, not disproven.** Nested Singularity failed
    in the pilot with `libsubid.so.3: cannot open shared object file` — an alma8 binary
    against CentOS 7 libraries, *not* the setuid restriction that blocks containers
    under bwrap. `starter-suid` is setuid on the host. Retest on the alma8 image before
    concluding either way; it is the main capability this backend might add.
-3. **`SANDBOX_RO_BINDS` is unchecked.** Optional and per-agent, so a typo in a source
+4. **`SANDBOX_RO_BINDS` is unchecked.** Optional and per-agent, so a typo in a source
    path fails silently. An assertion that each `src` exists would be cheap.
-4. **BU-specific by construction.** The site bind list, `/share/pkg.N`, and the image
+5. **BU-specific by construction.** The site bind list, `/share/pkg.N`, and the image
    path are baked into `jail.sh`. Fine for RCS; if outside contributors are wanted,
    those want to become configuration — easier before people fork it.
 

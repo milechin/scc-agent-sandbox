@@ -28,8 +28,14 @@ BLIND_PATHS=("${BLIND_PATHS[@]:-}")
 
 [ -f "$IMAGE" ] || { echo "image not found: $IMAGE" >&2; exit 2; }
 
-# Verify in the SAME layout a real run uses: $OUT under the harness directory, which
-# is where run-agent.sh puts it by default. With $OUT in $TMPDIR instead, the harness
+# Verify with $OUT under the harness directory -- the NESTED layout, where the run
+# directory has to be bound back inside the harness mask. run-agent.sh now defaults
+# $OUT to $PWD instead, which is the un-nested case and strictly easier: nothing is
+# restored inside a mask, so nothing can leak out of one. Verifying the harder layout
+# covers both, and it is still the live layout whenever anyone runs from the clone.
+# Do not "align" this to $PWD -- that would stop exercising the mask-restore path.
+#
+# With $OUT in $TMPDIR instead, the harness
 # mask never has the run directory bound back inside it, so the nested-mount-point
 # behaviour that leaked into the target mask is never exercised and the gate passes
 # while real runs leak. Checking a configuration nobody runs is how that got missed.
@@ -55,6 +61,35 @@ build_sandbox_args "$IMAGE" "$PKG_ROOT" "$PKG" "$VER" "$WORK" "$OUT" "$EMPTY" \
                    "${BLIND_PATHS[@]}"
 [ "$SANDBOX_BLINDED" = 1 ] || echo "  note  $PKG/$VER not present under $PKG_ROOT; nothing to blind"
 
+# If an instruction directory was auto-discovered in the launch directory, probe the
+# FIRST one: it must be readable inside, and its parent must still be WRITABLE. The
+# parent is the point -- binding the whole config directory read-only would stop an
+# agent writing its own state, which is the mistake this design exists to avoid, and
+# it would pass a check that only looked at readability.
+AB0=${SANDBOX_AUTOBOUND[0]:-}
+AB_PROBE=""
+if [ -n "$AB0" ]; then
+  AB_PROBE='
+  t abread "$(ls -A "$HOME/'"$AB0"'" 2>/dev/null | wc -l)"
+  touch "$HOME/'"${AB0%%/*}"'/.probe" 2>/dev/null && { t abparent rw; rm -f "$HOME/'"${AB0%%/*}"'/.probe"; } || t abparent ro'
+fi
+
+# The extra masks -- BLIND_PATHS from the case, SANDBOX_BLIND_EXTRA from the launcher --
+# verified the same way as the target, by counting entries from inside. Without this
+# they were the one part of the blinding that was asserted only by construction: a mask
+# in the wrong section, or a path that resolves elsewhere inside the container, would
+# read as configured while leaking. Sums the counts because any nonzero total is a leak
+# and the per-path detail is one `ls` away under --shell.
+EXTRA_PROBE=""
+if [ "${#SANDBOX_BLIND_MASKED[@]}" -gt 0 ]; then
+  EXTRA_PROBE='
+  _xn=0
+  for _xp in '"$(printf '%q ' "${SANDBOX_BLIND_MASKED[@]}")"'; do
+    _xn=$((_xn + $(ls -A "$_xp" 2>/dev/null | wc -l)))
+  done
+  t extras "$_xn"'
+fi
+
 # Every probe in ONE container instance, so this tests the real composed mount set
 # rather than several different partial ones.
 out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
@@ -72,6 +107,13 @@ out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   t homecount "$(ls -A "$HOME" 2>/dev/null | wc -l)"
   t harness "$(ls -A "'"$HERE"'/cases" 2>/dev/null | wc -l)"
   getent hosts github.com >/dev/null 2>&1 && t dns ok || t dns down
+  t sgeroot "$(ls -A /usr/local/sge 2>/dev/null | wc -l)"
+  t sgespool "$(ls -A /var/spool/sge 2>/dev/null | wc -l)"
+  t qsubpath "$(command -v qsub >/dev/null 2>&1 && echo present || echo absent)"
+  # Informational only, and deliberately a no-op submission: -verify makes qsub check
+  # and print rather than queue anything. On the pilot this cannot even load its
+  # libraries, which is why the CHECKS below assert the mask, not the outcome.
+  t qsubrun "$(qsub -verify -b y /bin/true 2>&1 | tr "\n" " " | cut -c1-60)"'"$AB_PROBE$EXTRA_PROBE"'
 ' 2>&1)
 
 g() { sed -n "s/^$1=//p" <<<"$out"; }
@@ -94,12 +136,46 @@ if [ "$SANDBOX_BLINDED" = 1 ]; then
   check "target not listed by module avail" 0      "$(g listed)"
   check "loading it reports 'unknown'"      unknown "$(g loaderr)"
 fi
+if [ "${#SANDBOX_BLIND_MASKED[@]}" -gt 0 ]; then
+  check "extra masks show 0 entries (${#SANDBOX_BLIND_MASKED[@]} paths)" 0 "$(g extras)"
+fi
+# Not a failure -- an absent path is legitimate on a host that lacks it -- but printed,
+# because the alternative is a typo in BLIND_PATHS or SANDBOX_BLIND_EXTRA leaving an
+# answer surface readable with nothing said anywhere.
+if [ "${#SANDBOX_BLIND_SKIPPED[@]}" -gt 0 ]; then
+  printf '  note  %-46s %s path(s)\n' "requested mask absent, NOT applied" "${#SANDBOX_BLIND_SKIPPED[@]}"
+  for _s in "${SANDBOX_BLIND_SKIPPED[@]}"; do printf '          %s\n' "$_s"; done
+fi
 if [ -n "$PRIOR_VER" ]; then
   if [ "$(g prior)" -gt 0 ] 2>/dev/null; then
     printf '  ok    %-46s %s entries\n' "prior version $PRIOR_VER readable" "$(g prior)"; pass=$((pass+1))
   else
     printf '  FAIL  %-46s unreadable\n' "prior version $PRIOR_VER readable"; fail=$((fail+1))
   fi
+fi
+
+echo "  --- batch system (host escape) ---"
+# A batch job runs on the HOST as the real user, outside every bind and every mask, so
+# it is the one path that defeats both the write scope and the blinding at once. These
+# checks assert the MASK is in place; they deliberately do not assert that submission
+# fails, because on the CentOS 7 pilot the SGE clients cannot load their libraries
+# either way and a check whose subject is already broken proves nothing. What they do
+# catch is the mask going missing -- which is the thing that will matter on alma8.
+if [ "$SANDBOX_BATCH_BLOCKED" = 1 ]; then
+  check "SGE_ROOT masked (0 entries)"       0        "$(g sgeroot)"
+  check "SGE spool masked (0 entries)"      0        "$(g sgespool)"
+  # Recorded, not asserted. /usr/local/bin/qsub is a SYMLINK into the SGE root
+  # (-> /usr/local/ogs-ge2011.11.p1/bin/qsub), so masking the root dangles every client
+  # and they leave PATH as well -- "absent" here, and "command not found" below. That is
+  # a consequence of the mask, not a second mechanism, which is why it is a note: on an
+  # image where the clients are real files it would read "present" and the mask would
+  # still be the thing doing the work.
+  printf '  note  %-46s %s\n' "qsub on PATH" "$(g qsubpath)"
+  printf '  note  %-46s %s\n' "qsub -verify says" "$(g qsubrun)"
+else
+  printf '  WARN  %-46s %s\n' "BATCH SUBMISSION ALLOWED" "SANDBOX_ALLOW_BATCH is set"
+  printf '        %s\n' "This run is NOT contained and NOT blinded: a submitted job runs on" \
+                         "the host as $USER, can write /share, and sees the unmasked target."
 fi
 
 echo "  --- home isolation ---"
@@ -112,6 +188,16 @@ if [ "$(g homecount)" -le 4 ] 2>/dev/null; then
   printf '  ok    %-46s %s entries (isolated)\n' "\$HOME is NOT the real home" "$(g homecount)"; pass=$((pass+1))
 else
   printf '  FAIL  %-46s %s entries — the real home is exposed\n' "\$HOME is NOT the real home" "$(g homecount)"; fail=$((fail+1))
+fi
+
+if [ -n "$AB0" ]; then
+  echo "  --- agent instructions (auto-bound from $PWD) ---"
+  if [ "$(g abread)" -gt 0 ] 2>/dev/null; then
+    printf '  ok    %-46s %s entries\n' "\$HOME/$AB0 readable" "$(g abread)"; pass=$((pass+1))
+  else
+    printf '  FAIL  %-46s empty or missing\n' "\$HOME/$AB0 readable"; fail=$((fail+1))
+  fi
+  check "\$HOME/${AB0%%/*} still writable"   rw       "$(g abparent)"
 fi
 
 # The site binds sweep in whatever filesystem the harness lives on, so cases/*.env --

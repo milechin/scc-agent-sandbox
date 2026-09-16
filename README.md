@@ -10,13 +10,20 @@ into its own repository and pointed at anyone's agent.
 
 ## Quick start
 
-Needs a compute node (`$NSLOTS` set) and nothing else installed.
+Needs a compute node (`$NSLOTS` set). Nothing to build or install beyond what the SCC
+already provides (`bash`, `git`, `singularity`).
 
 ```bash
-cd agent-sandbox
+cd /projectnb/<your-project>          # a shared filesystem — see below
+git clone git@github.com:milechin/scc-agent-sandbox.git
+cd scc-agent-sandbox
+
 ./verify-sandbox.sh cases/fftw-3.3.8.env     # prove the jail before trusting a run
 ./run-agent.sh      cases/fftw-3.3.8.env --shell
 ```
+
+Use `https://github.com/milechin/scc-agent-sandbox.git` if you have no SSH key on the
+SCC.
 
 `run-agent.sh` runs the gate itself and **refuses to start** if it fails. You land at
 a prompt inside the container, with a banner naming the paths:
@@ -45,14 +52,88 @@ cd <the workspace from the banner>   # the only place you can write
 
 ### Run an agent instead of a shell
 
+An agent needs three things inside: its **binary**, its **credential**, and its
+**instructions**. For Claude Code, all three are one block — run it from the directory
+holding the skills you are testing, and the `.claude/` there is mounted automatically:
+
 ```bash
-export SANDBOX_AGENT_DIR=$HOME/.local      # binds the agent in; its bin/ goes on PATH
-./run-agent.sh cases/fftw-3.3.8.env --shell            # then run it by hand
-./run-agent.sh cases/fftw-3.3.8.env --agent-cmd '...'  # or scripted, captured
+S=/projectnb/<your-project>/scc-agent-sandbox            # the clone
+cd /projectnb/<your-project>/my-agent                    # ./.claude/skills is picked up
+
+# once: a minimal ~/.claude.json marking setup done and this run's dirs trusted
+"$S/tools/claude-home.sh" ./claude-seed.json "$HOME" "$PWD/work"
+
+export SANDBOX_AGENT_DIR=$HOME/.local                    # the binary; its bin/ goes on PATH
+export SANDBOX_HOME_FILES="$HOME/.claude/.credentials.json:.claude/.credentials.json"
+export SANDBOX_HOME_COPIES="$PWD/claude-seed.json:.claude.json"
+
+"$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" --work "$PWD/work" --shell   # by hand
+"$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" \
+    --agent-cmd 'claude -p "install fftw 3.3.8" --allowedTools Bash'     # or scripted
 ```
 
+**Both lines are needed to stop Claude asking you to authenticate**, and they do
+different jobs — binding only the credential is not enough, which is easy to get
+wrong because it *looks* like it should be:
+
+| | file | why |
+|---|---|---|
+| `SANDBOX_HOME_FILES` | `.claude/.credentials.json` | the token, **bound** so it stays in your real home |
+| `SANDBOX_HOME_COPIES` | `.claude.json` | setup state, **copied** because Claude rewrites it |
+
+The private `$HOME` starts empty, so Claude Code re-runs first-time setup on every
+run: the theme picker, then the login prompt, then the folder-trust dialog. All three
+are state in `~/.claude.json`, *not* in the credential file. `claude -p` skips all
+three, so a scripted run can work while `--shell` still asks you to log in.
+
+`tools/claude-home.sh` writes a seed holding four onboarding keys and the trust flags
+for the directories you name — rather than your real `~/.claude.json`, which is large
+and personal (78 KB and 17 project paths on the machine this was written for) and has
+no business in a run directory. Name the workspace with `--work` so you can trust it
+in advance; otherwise it is stamped per run and Claude asks once when you `cd` there.
+
+Copied, not bound, because Claude rewrites this file constantly — measured at 42 KB by
+the end of one short run. A read-write bind would push all of that into your real
+config, and its atomic save would fail against a mount point anyway.
+
+Verified with Claude Code 2.1.267 on the pilot image: both `claude -p` and the
+interactive TUI start authenticated inside the jail, with no prompt.
+`SINGULARITYENV_ANTHROPIC_API_KEY` replaces the credential line if you use an API key.
+
+For another agent, the same three settings apply with different values;
+`SANDBOX_AUTOBIND_DIRS` changes the instruction directory name.
+
 Scripted output lands in `$OUT/agent.stdout` / `agent.stderr`, with `run.meta` and
-`argv.txt` recording exactly what ran.
+`argv.txt` recording exactly what ran — including `autobound=`, `home_files=` and
+`home_copies=`, so a run says what it was given. Paths only, never contents: one of
+those files is a credential.
+
+### Where to clone it, and where to run it from
+
+**Clone it on a shared filesystem** — a project disk or your home directory. Not
+`/scratch` or `/tmp`: those are node-local, so a clone made on a login node is not
+there when the job lands on a compute node.
+
+**Run it from wherever the results belong.** `results/<case>-<stamp>/` is written to
+the directory you run *from*, not the clone — the harness is a mechanism, not a data
+store. So the usual invocation is from the agent under test, which also gets its
+instructions mounted automatically (see [Configuration](#configuration)):
+
+```bash
+S=/projectnb/<your-project>/scc-agent-sandbox   # the clone, once
+cd /projectnb/<your-project>/my-agent           # the agent under test
+"$S/run-agent.sh" "$S/cases/fftw-3.3.8.env" --shell
+```
+
+`--out <dir>` overrides the location outright. Running from inside the clone, as the
+quick start does, puts results in `results/`, which is `.gitignored`.
+
+**Do not put the scripts on `PATH`.** Absolute paths already work from anywhere, but a
+**symlink** into `~/bin` breaks the harness outright: each script resolves its location
+with `dirname "$BASH_SOURCE"`, which yields the symlink's directory, so the
+`. "$HERE/jail.sh"` both scripts depend on finds nothing. A `PATH` entry pointing at
+the clone itself is harmless, and saves little — the case file is still a path you have
+to type.
 
 ---
 
@@ -83,11 +164,141 @@ All optional, all environment variables.
 | `SANDBOX_RO_BINDS` | extra read-only binds, **one `src:dst` per line** |
 | `SANDBOX_CAPTURE_AT` | only for an agent whose state dir is *not* under `$HOME` |
 | `SANDBOX_VERBOSE=1` | restore Singularity's INFO/WARNING output when diagnosing |
+| `SANDBOX_AUTOBIND_DIRS` | instruction directory names to look for in the launch directory; default `.claude`, empty to disable |
+| `SANDBOX_AUTOBIND_FROM` | look there instead of the current directory |
+| `SANDBOX_HOME_FILES` | individual files **bound** into the private home, **one `src:dst` per line**, `dst` relative to `$HOME`; how an agent gets its credential |
+| `SANDBOX_HOME_COPIES` | same syntax, but **copied** — for config the agent rewrites, such as `.claude.json` |
+| `SANDBOX_BLIND_EXTRA` | extra paths to **mask**, **one path per line** — the agent's own `results/` and test harness |
+| `SANDBOX_ALLOW_BATCH=1` | **removes the batch-system block.** A submitted job runs on the host, outside every mask — such a run is neither contained nor blinded |
 
 `SANDBOX_RO_BINDS` is a **string, not an array** — bash arrays cannot be exported, so
 an array set in your shell silently never arrives and the binds vanish without error.
 
-**Where an agent finds its instructions.** The shell starts in `$HOME`, not your repo,
+### `SANDBOX_BLIND_EXTRA`: the agent's own prior runs are an answer key
+
+`$OUT` defaults to `$PWD/results/<case>-<stamp>/`, so an agent launched from its own
+repository accumulates its history there — and that directory is under `/projectnb`,
+which the site bind list sweeps in read-only. The first run is clean. Every run after
+it can read the last one's `run.meta` and `argv.txt` (both name `VER` and `PRIOR_VER`)
+and `homedir/.claude/**/*.jsonl`, the previous attempt's full transcript. The same goes
+for a second test harness in that repo and its `cases/`.
+
+`jail.sh` masks only *itself*, so nothing in this harness knows those paths. Mask them
+from the launch side, next to the other per-agent settings:
+
+```bash
+export SANDBOX_BLIND_EXTRA="$PWD/results
+$PWD/tests"
+./run-agent.sh /path/to/scc-agent-sandbox/cases/fftw-3.3.8.env --shell \
+    --out /projectnb/dvm-rcs/temp/runs/fftw-3.3.8-$(date +%Y%m%d-%H%M%S)
+```
+
+**`--out` must then live outside the masked tree.** The run directory is bound back
+over a mask only when it sits under this harness (`SANDBOX_SELF_DIR`), so a `$OUT`
+inside `$PWD/results` would be masked along with the rest and the workspace would come
+back read-only. That fails loudly — the gate's "workspace is writable" check flips to
+`ro` and the run refuses to start — but the fix is to put `--out` elsewhere, as above.
+
+Why this is an environment variable and not `BLIND_PATHS` in the case file: a case
+describes a *package* and has to stay reusable against anyone's agent, so one
+particular checkout's path does not belong in it. `BLIND_PATHS` is for answer surfaces
+belonging to the **target** (a notes archive about fftw, a scratch copy of the recipe);
+`SANDBOX_BLIND_EXTRA` is for ones belonging to the **agent**.
+
+A mask whose source does not exist is skipped, since an absent path is legitimate on a
+host that lacks it — but never silently: the gate prints `requested mask absent, NOT
+applied`, `run-agent.sh` warns, and `run.meta` records `blind_masked` and
+`blind_skipped`. The gate also counts entries inside every applied mask, so these are
+verified from within the container rather than trusted by construction.
+
+**Where an agent finds its instructions — the automatic version.** Run from a directory
+containing a `.claude/`, and each populated subdirectory of it is mounted read-only at
+### `SANDBOX_BLIND_EXTRA`: the agent's own prior runs are an answer key
+
+`$OUT` defaults to `$PWD/results/<case>-<stamp>/`, so an agent launched from its own
+repository accumulates its history there — and that directory is under `/projectnb`,
+which the site bind list sweeps in read-only. The first run is clean. Every run after
+it can read the last one's `run.meta` and `argv.txt` (both name `VER` and `PRIOR_VER`)
+and `homedir/.claude/**/*.jsonl`, the previous attempt's full transcript. The same goes
+for a second test harness in that repo and its `cases/`.
+
+`jail.sh` masks only *itself*, so nothing in this harness knows those paths. Mask them
+from the launch side, next to the other per-agent settings:
+
+```bash
+export SANDBOX_BLIND_EXTRA="$PWD/results
+$PWD/tests"
+./run-agent.sh /path/to/scc-agent-sandbox/cases/fftw-3.3.8.env --shell \
+    --out /projectnb/dvm-rcs/temp/runs/fftw-3.3.8-$(date +%Y%m%d-%H%M%S)
+```
+
+**`--out` must then live outside the masked tree.** The run directory is bound back
+over a mask only when it sits under this harness (`SANDBOX_SELF_DIR`), so a `$OUT`
+inside `$PWD/results` would be masked along with the rest and the workspace would come
+back read-only. That fails loudly — the gate's "workspace is writable" check flips to
+`ro` and the run refuses to start — but the fix is to put `--out` elsewhere, as above.
+
+Why this is an environment variable and not `BLIND_PATHS` in the case file: a case
+describes a *package* and has to stay reusable against anyone's agent, so one
+particular checkout's path does not belong in it. `BLIND_PATHS` is for answer surfaces
+belonging to the **target** (a notes archive about fftw, a scratch copy of the recipe);
+`SANDBOX_BLIND_EXTRA` is for ones belonging to the **agent**.
+
+A mask whose source does not exist is skipped, since an absent path is legitimate on a
+host that lacks it — but never silently: the gate prints `requested mask absent, NOT
+applied`, `run-agent.sh` warns, and `run.meta` records `blind_masked` and
+`blind_skipped`. The gate also counts entries inside every applied mask, so these are
+verified from within the container rather than trusted by construction.
+
+the matching place under the private `$HOME`:
+
+```
+./.claude/skills  ->  $HOME/.claude/skills   (read-only)
+./.claude/agents  ->  $HOME/.claude/agents   (read-only)
+```
+
+So `cd <agent repo>; run-agent.sh <case> --shell` needs no configuration: the agent
+finds its instructions at user scope from any working directory. The banner lists what
+was picked up, and `run.meta` records it as `autobound=`.
+
+Note what is deliberately *not* bound. **Subdirectories, never `.claude` itself** —
+binding the parent read-only would leave the agent unable to write its own state, and
+Claude Code writes settings, todos and transcripts into `~/.claude`, so it would fail
+to start and the transcript you were collecting would never exist. **Loose files** such
+as `settings.json` or `CLAUDE.md` are skipped too: they are project-scope, and binding
+them at user scope changes their meaning. **Empty subdirectories** are skipped, as the
+bind would provide nothing.
+
+Set `SANDBOX_AUTOBIND_DIRS` to another name for a non-Claude agent, or to the empty
+string to switch the mechanism off.
+
+### `SANDBOX_HOME_FILES`: credentials and other loose files
+
+Individual files placed in the private home, one `src:dst` per line, `dst` relative to
+`$HOME`. The case it exists for is a **credential** — see
+[Run an agent instead of a shell](#run-an-agent-instead-of-a-shell) for the Claude Code
+recipe. Opt-in with no default: nothing that moves a credential should happen because
+someone ran from a particular directory. `run.meta` records the *paths* placed this way
+as `home_files=`, never their contents.
+
+The file is **bound, not copied**, so the credential stays in your real home and no
+live token is left in the run directory — which people copy around and attach to
+tickets. (An empty `.credentials.json` does appear under `results/<stamp>/homedir/`:
+that is the mount point Singularity materialises, not the token.)
+
+Three consequences of binding rather than copying, all measured:
+
+- The bind is **read-write**, so an agent refreshing an expiring token writes through
+  to your real file. That keeps host and sandbox in sync, and it also means the agent
+  under test can modify or corrupt your real credential.
+- An **atomic** save — write a temp file, rename over the target — **fails**, because
+  you cannot rename over a mount point. In-place writes work. If an agent saves the
+  atomic way, copy the file into `results/<stamp>/homedir/.claude/` before the run
+  instead.
+- An API key avoids all of this where it applies: `SINGULARITYENV_ANTHROPIC_API_KEY`
+  is forwarded like the other `SINGULARITYENV_*` variables.
+
+**The manual version.** The shell starts in `$HOME`, not your repo,
 so a project-scope agent finds nothing until you `cd` — and every repo path is
 read-only inside, so it would then be working somewhere it cannot write. Mounting the
 instructions into the private home avoids both:
@@ -112,6 +323,11 @@ They are then found from any cwd, leaving the writable workspace free to work in
 | `$HOME` | private per-run directory, writable, isolated from the real one |
 | this harness (`cases/`, `results/`) | masked — the answer key is not readable |
 | the workspace | the only writable path |
+| batch submission | blocked — `SGE_ROOT` masked, spool unbound, clients dangle |
+
+The one deliberate hole: a file placed with `SANDBOX_HOME_FILES` is bound read-write,
+so writes to it reach the real file outside. That is what lets a credential refresh,
+and it is the only path by which the agent can change anything in your real home.
 
 ### Inspecting mounts from inside
 
@@ -141,6 +357,31 @@ Reversed, the parent overlays the mask and the target is fully readable, with no
 error, warning or exit code. `verify-sandbox.sh` builds a deliberately mis-ordered
 argv and asserts it **fails** to blind; a check that only ever sees the correct order
 cannot tell a working mask from an unnecessary one.
+
+**Masking undoes a bind nested under another, never one with the same destination.**
+Measured four ways on target `/var/spool/sge`: site bind then mask → **1 entry, the
+mask silently dropped**; mask then site bind → 0; mask alone → 0; neither → 0. So for
+an *identical* destination the **first** bind wins, the exact reverse of the
+parent/child rule above. Anything in the site list that must be hidden is therefore
+**omitted from that list**, not masked later — appending a mask looks right, changes
+nothing, and reports nothing. That is how the SGE spool stayed readable while the gate
+said the mask was configured.
+
+**Batch submission is a host escape, and the pilot hides it.** `qsub` hands work to the
+scheduler, which runs it **on the host as the real user**, outside every bind and every
+mask — it can write `/share` and read the unmasked target, defeating containment and
+blinding at once. `jail.sh` masks `SGE_ROOT` (resolving the `/usr/local/sge` symlink
+first — binding a directory over a symlink aborts the run with `not a directory`) and
+omits the spool from the site list. On the SCC that also dangles `/usr/local/bin/qsub`,
+which is a symlink into the SGE root, so the clients leave `PATH` entirely.
+
+Do not read the pilot as proof the block works: the SGE clients there are alma8
+binaries that already fail with `libssl.so.1.1: cannot open shared object file`, the
+same accident as the nested-Singularity finding. The gate therefore asserts the *mask*,
+not the outcome, and this needs retesting on the alma8 image where the clients run.
+`SANDBOX_ALLOW_BATCH=1` lifts the block for the case where submission is the behaviour
+under test; the gate prints `WARN BATCH SUBMISSION ALLOWED` and `run.meta` records
+`batch_blocked=0`.
 
 **A bind is read-write by default.** `:ro` is what makes it read-only. The site
 wrapper `scc-singularity` generates every bind read-write — right for interactive
@@ -195,6 +436,9 @@ gets a clean answer.
   `libsubid.so.3: cannot open shared object file` — an alma8 binary against CentOS 7
   libraries, *not* the setuid restriction that blocks containers under `bwrap`. The
   host `starter-suid` is setuid, so retest on the alma8 image before concluding.
+- **The batch block is asserted, not demonstrated.** The SGE clients cannot load their
+  libraries on the CentOS 7 pilot, so the gate can only show `SGE_ROOT` and the spool
+  are empty, never that a live `qsub` is refused. Retest on alma8.
 - **The pilot image is CentOS 7.** Good for exercising the jail and `pkg.7` installs;
   alma8 work needs the alma8 image. An agent whose references describe alma8 and
   `/share/pkg.8` will disagree with what it sees inside.

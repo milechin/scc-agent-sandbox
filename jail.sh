@@ -51,12 +51,17 @@ SANDBOX_RO_DIRS=(
 # build_sandbox_args <image> <pkg_root> <pkg> <ver> <work> <out> <emptydir> [blind...]
 #
 # Sets: SANDBOX_ARGS (array)  SANDBOX_BLINDED (0|1)  SANDBOX_ENV (array of VAR=VAL)
+#       SANDBOX_AUTOBOUND (array of instruction dirs discovered in the launch dir)
+#       SANDBOX_HOME_FILES_BOUND (array of files placed in the private home)
+#       SANDBOX_BLIND_MASKED / SANDBOX_BLIND_SKIPPED (extra masks applied / not found)
+#       SANDBOX_BATCH_BLOCKED (1 = SGE masked, 0 = SANDBOX_ALLOW_BATCH escape hatch)
 build_sandbox_args() {
   local image=$1 pkg_root=$2 pkg=$3 ver=$4 work=$5 out=$6 emptydir=$7
   shift 7
   local extra_blind=("$@")
 
   SANDBOX_BLINDED=0
+  SANDBOX_BLIND_SKIPPED=()
 
   # ---- 1. isolate -------------------------------------------------------------
   # -e      clean environment (the wrapper does this too)
@@ -85,9 +90,25 @@ build_sandbox_args() {
   [ -n "${TMPDIR:-}" ] && SANDBOX_ENV+=( "SINGULARITYENV_TMPDIR=$TMPDIR" )
 
   # ---- 2. read-only data ------------------------------------------------------
+  # MASKING CANNOT UNDO A BIND WITH THE SAME DESTINATION, only one nested under it.
+  # Measured on singularity-ce 4.5.0, all four variants, target /var/spool/sge:
+  #
+  #   site bind then mask (same dst)   -> 1 entry   the mask is SILENTLY DROPPED
+  #   mask then site bind (same dst)   -> 0 entries the first bind wins
+  #   mask alone                       -> 0 entries
+  #   neither                          -> 0 entries the image's own dir is empty
+  #
+  # So for an IDENTICAL destination the FIRST bind wins -- the reverse of the
+  # parent/child rule in the header, where the LAST wins. Anything in this list that
+  # has to be hidden must therefore be dropped HERE; appending a mask in section 7
+  # looks right, changes nothing, and reports nothing. That is how the SGE spool sat
+  # readable while the gate said the mask was configured.
   local d
   for d in "${SANDBOX_RO_DIRS[@]}"; do
-    [ -d "$d" ] && SANDBOX_ARGS+=( --bind "$d:$d:ro" )
+    [ -d "$d" ] || continue
+    # The batch spool is the one entry hiding it needs, and only when blocking batch.
+    if [ -z "${SANDBOX_ALLOW_BATCH:-}" ] && [ "$d" = /var/spool/sge ]; then continue; fi
+    SANDBOX_ARGS+=( --bind "$d:$d:ro" )
   done
   [ -f /var/lib/dbus/machine-id ] && \
     SANDBOX_ARGS+=( --bind /var/lib/dbus/machine-id:/var/lib/dbus/machine-id:ro )
@@ -152,6 +173,73 @@ build_sandbox_args() {
     [ -e "${rb%%:*}" ] && SANDBOX_ARGS+=( --bind "$rb:ro" )
   done <<< "${SANDBOX_RO_BINDS:-}"
 
+  # Same idea, discovered instead of declared: if the directory the run was launched
+  # from holds an agent's instruction directory, mount it into the private home so the
+  # agent finds it from any cwd. Saves writing out the SANDBOX_RO_BINDS block by hand
+  # for the common case of `cd <agent repo>; run-agent.sh <case>`.
+  #
+  # SUBDIRECTORIES, NOT THE PARENT. Binding <name> itself read-only would make the
+  # whole config directory read-only inside, and an agent that writes its state there
+  # (Claude Code writes settings, transcripts and todos into ~/.claude) would be unable
+  # to start -- and the run's own transcript, usually the thing being collected, would
+  # never be produced. Binding one level down leaves $HOME/<name> writable.
+  #
+  # Loose files directly inside <name> are deliberately skipped: a project-scope
+  # settings.json or CLAUDE.md bound at user scope would change its meaning, and it is
+  # the harness author's environment leaking into a run that exists to observe the
+  # agent unaided.
+  #
+  # AGENT-AGNOSTIC, JUST BARELY. The mechanism knows nothing about any agent; ".claude"
+  # appears only as a default directory NAME. Override it for another agent's layout,
+  # or set it empty to switch the whole thing off:
+  #   SANDBOX_AUTOBIND_DIRS=".config/some-agent"   SANDBOX_AUTOBIND_DIRS=""
+  # SANDBOX_AUTOBIND_FROM overrides the source directory when it is not the cwd.
+  SANDBOX_AUTOBOUND=()
+  local ab_from=${SANDBOX_AUTOBIND_FROM:-$PWD} ab_name ab_sub
+  for ab_name in ${SANDBOX_AUTOBIND_DIRS-.claude}; do
+    [ -d "$ab_from/$ab_name" ] || continue
+    for ab_sub in "$ab_from/$ab_name"/*/; do
+      [ -d "$ab_sub" ] || continue          # no match: the glob came back literal
+      ab_sub=${ab_sub%/}
+      # Skip empty ones. An empty .claude/agents next to a populated .claude/skills is
+      # perfectly normal, the bind would provide nothing, and binding it anyway makes
+      # the gate's readability check fail on a repo that is not actually broken.
+      [ -n "$(ls -A "$ab_sub" 2>/dev/null)" ] || continue
+      SANDBOX_ARGS+=( --bind "$ab_sub:$HOME/$ab_name/$(basename "$ab_sub"):ro" )
+      SANDBOX_AUTOBOUND+=( "$ab_name/$(basename "$ab_sub")" )
+    done
+  done
+
+  # Individual FILES placed in the private home, "src:dst" per line, dst relative to
+  # $HOME unless absolute. The case this exists for is a credential: the private home
+  # is empty, so an agent that authenticates from a file in $HOME asks the operator to
+  # log in again on every run.
+  #
+  # Bound in place rather than copied, so the credential stays in the real home and no
+  # live token is left behind in the run directory (which people copy around and attach
+  # to tickets). Bound READ-WRITE, which is a deliberate trade in both directions:
+  #
+  #   * an agent refreshing an expiring token writes THROUGH to the real file, which is
+  #     what keeps host and sandbox in sync -- but it also means the agent under test
+  #     can modify or corrupt the real credential. :ro instead makes refresh fail.
+  #   * measured on singularity-ce 4.5.0: an in-place write to a bind-mounted file
+  #     works and reaches the host file, but an ATOMIC replace (write temp, rename over
+  #     it) FAILS -- you cannot rename over a mount point. An agent that saves this way
+  #     will be unable to write. Copy the file into $OUT/homedir instead if that bites.
+  #
+  # Opt-in, no default: nothing that moves a credential should happen because someone
+  # ran from the wrong directory.
+  SANDBOX_HOME_FILES_BOUND=()
+  local hf hf_src hf_dst
+  while IFS= read -r hf; do
+    [ -n "$hf" ] || continue
+    hf_src=${hf%%:*}; hf_dst=${hf#*:}
+    [ -f "$hf_src" ] || continue
+    case "$hf_dst" in /*) ;; *) hf_dst="$HOME/$hf_dst" ;; esac
+    SANDBOX_ARGS+=( --bind "$hf_src:$hf_dst" )
+    SANDBOX_HOME_FILES_BOUND+=( "$hf_dst" )
+  done <<< "${SANDBOX_HOME_FILES:-}"
+
   # ---- 7. MASKS, LAST ---------------------------------------------------------
   # Everything above this line is visible; everything here is hidden. Appending in
   # this order is the entire blinding guarantee -- see the header.
@@ -212,10 +300,107 @@ build_sandbox_args() {
     esac
   fi
 
+  # ---- BATCH SYSTEM: the one escape the write scope does not cover -------------
+  # Everything above confines what the agent can do INSIDE the container. A batch job
+  # is different in kind: qsub hands work to the scheduler, which runs it ON THE HOST
+  # as the invoking user, outside every bind and every mask. Measured from inside the
+  # pilot: qsub/qrsh/qlogin/qmod/qdel are all on PATH from /usr/local/bin, and `id -un`
+  # is the real user. A job would therefore have write access to /share and an
+  # UNMASKED view of the blinded version -- it breaks containment and blinding at once.
+  #
+  # Masking SGE_ROOT and omitting the spool is what stops it: every client reads its
+  # cell configuration from there to find the qmaster, so with those gone there is
+  # nothing to submit to, whatever is on PATH. On the SCC it goes further than intended
+  # and that is worth knowing rather than relying on: /usr/local/bin/qsub is a symlink
+  # into the SGE root, so masking the root dangles every client and qsub/qrsh/qlogin
+  # leave PATH entirely ("command not found", measured). On an image where they are
+  # real files the mask is still the mechanism -- do not treat the missing binary as
+  # the protection.
+  #
+  # Env-based blocking (dropping SGE_ROOT) is not enough on its own: the container's
+  # own /etc/profile.d sets it again, measured as SGE_ROOT=/usr/local/sge/sge_root
+  # inside a -e --contain run.
+  #
+  # HONEST LIMIT, do not read the gate as more than it says: on the CentOS 7 pilot the
+  # clients ALREADY fail with `libssl.so.1.1: cannot open shared object file` -- alma8
+  # binaries against CentOS 7 libraries, the same accident as the nested-Singularity
+  # libsubid.so.3 finding. So this image cannot demonstrate that the mask is what
+  # blocks submission; it can only show the mask is in place. Retest on the alma8
+  # image, where the clients are expected to run, before trusting the block itself.
+  #
+  # SANDBOX_ALLOW_BATCH=1 removes the mask, for the case where submission is the very
+  # behaviour under test. A run with it set is NOT contained and NOT blinded: the agent
+  # can reach the host. run.meta records it and the gate says so loudly.
+  if [ -z "${SANDBOX_ALLOW_BATCH:-}" ]; then
+    SANDBOX_BATCH_BLOCKED=1
+    # SGE_ROOT is /usr/local/sge/sge_root on the SCC; mask the parent so the cell, the
+    # settings files and the CA directories all go with it.
+    #
+    # RESOLVE FIRST. /usr/local/sge is a SYMLINK (-> ogs-ge2011.11.p1, since 2013), and
+    # binding a directory over a symlink does not shadow it -- it aborts the whole run:
+    #   FATAL: container creation failed: mount .../m3->/usr/local/sge error: ...
+    #          could not mount ...: not a directory
+    # Masking the resolved directory works and the symlink then points into the mask,
+    # so the client sees an empty SGE_ROOT either way. Measured both ways.
+    #
+    # /share/sge is deliberately not here: mode 700 root-owned, so it is unreadable to
+    # the user with or without a mask.
+    # Children of /usr/local, so masking works here. /var/spool/sge is NOT in this
+    # list: it is its own bind destination in section 2 and a mask over it is dropped,
+    # so it is omitted there instead.
+    local sd sd_real
+    for sd in /usr/local/sge /usr/local/sgeCA; do
+      sd_real=$(readlink -f "$sd" 2>/dev/null) || continue
+      [ -n "$sd_real" ] && [ -d "$sd_real" ] && _mask "$sd_real"
+    done
+    # Belt and braces, and it documents intent in argv.txt: point the clients nowhere
+    # even if a future image resolves SGE_ROOT differently.
+    SANDBOX_ENV+=( "SINGULARITYENV_SGE_ROOT=/nonexistent" )
+  else
+    SANDBOX_BATCH_BLOCKED=0
+  fi
+
+  # Extra masks from two sources, both applied here in the mask section.
+  #
+  #   BLIND_PATHS (case file)  -- answer surfaces belonging to the TARGET: a notes
+  #                               archive for this package, a scratch copy of the recipe.
+  #   SANDBOX_BLIND_EXTRA      -- answer surfaces belonging to the AGENT: its own
+  #                               results/ tree of prior runs, its own test harness and
+  #                               that harness's cases/. A STRING, one path per line.
+  #
+  # The split is the agent-agnostic rule. A case file describes a package and must stay
+  # reusable against anyone's agent, so the path to one particular checkout does not
+  # belong in it -- it belongs with whoever launches that agent, next to
+  # SANDBOX_AUTOBIND_FROM and SANDBOX_HOME_COPIES. Both lists were briefly kept in the
+  # case file and it immediately hardcoded a local clone path into cases/fftw-3.3.8.env.
+  #
+  # A string, not an array, for the same reason as SANDBOX_RO_BINDS: bash arrays cannot
+  # be exported, so an array set in the caller's shell silently never arrives.
+  local extra_line
+  while IFS= read -r extra_line; do
+    [ -n "$extra_line" ] && extra_blind+=( "$extra_line" )
+  done <<< "${SANDBOX_BLIND_EXTRA:-}"
+
+  SANDBOX_BLIND_MASKED=()
   local b
   for b in "${extra_blind[@]}"; do
+    # BLIND_PATHS=() reaches here as ONE EMPTY element, because both callers normalise
+    # it with "${BLIND_PATHS[@]:-}" so that `set -u` does not trip on an empty array.
+    # Dropping empties first is what keeps the default case from reporting a phantom
+    # skipped mask -- which it did, the moment skips started being reported at all.
+    [ -n "$b" ] || continue
     # Masking a nonexistent path is a hard error, not a no-op.
-    [ -e "$b" ] && _mask "$b"
+    if [ -e "$b" ]; then
+      _mask "$b"
+      SANDBOX_BLIND_MASKED+=( "$b" )
+    else
+      # Recorded, not fatal: a case that lists a notes archive should stay usable on a
+      # host where it is absent, and SANDBOX_BLIND_EXTRA naming an agent repo that is
+      # not checked out here is normal. But a silent skip is how a typo becomes a leak
+      # nothing reports, so the gate prints these and run.meta records them -- open
+      # item 3, for the same reason, applies to SANDBOX_RO_BINDS.
+      SANDBOX_BLIND_SKIPPED+=( "$b" )
+    fi
   done
 
   SANDBOX_ARGS+=( "$image" )
