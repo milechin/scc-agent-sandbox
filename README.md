@@ -311,6 +311,7 @@ They are then found from any cwd, leaving the writable workspace free to work in
 | | |
 |---|---|
 | `/share` and the package tree | read-only — writes return `EROFS` |
+| filesystems mounted *inside* a site dir | read-only too — each gets its own `:ro` bind (`/restricted/project`, `/restricted/projectnb`) |
 | the target `<pkg>/<ver>` | contents masked; absent from `module avail` — **only with a case file**; without one nothing is blinded and the tree is complete |
 | sibling versions | readable, so prior art works |
 | `$HOME` | private per-run directory, writable, isolated from the real one |
@@ -329,6 +330,21 @@ findmnt -O ro -rno TARGET                              # the read-only mounts
 findmnt --target /share/pkg.7 -no TARGET,VFS-OPTIONS   # what governs ONE path
 awk '$5 == "/share" {print $5, $6}' /proc/self/mountinfo   # no-tooling fallback
 ```
+
+**`:ro` does not reach a filesystem mounted underneath.** The bind is recursive, so a
+nested mount comes along — but it keeps its own flags. `--bind /restricted:ro` gave
+`/restricted` as `ro` and left `/restricted/project` and `/restricted/projectnb`, which
+are separate NFS mounts, `rw`. It looked contained because a write to the top of those
+mounts is refused — by POSIX permissions, *Permission denied*, not by the mount — while
+anywhere inside them the user could write, their own restricted projects, was writable
+from the jail. `jail.sh` enumerates nested mounts from `/proc/self/mountinfo` and binds
+each `:ro` after its parent, and the gate asserts the write fails with *Read-only file
+system* specifically: a check that only required the write to fail would have passed
+the whole time.
+
+A workspace inside one of them still works — `--work /restricted/projectnb/<proj>/w` is
+writable while the rest of that project stays read-only — because the workspace is
+bound later, and later wins.
 
 A plain listing shows **shadowed** mounts — `/usr1` is `ro` while `/usr1/scv/<you>` is
 `rw` on top of it — so reading the first match reports the opposite of the truth;

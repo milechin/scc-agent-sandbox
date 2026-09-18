@@ -131,6 +131,25 @@ if [ -n "$PRIOR_VER" ]; then
   t prior "$(ls -A "'"$PKG_ROOT"'/'"$PKG"'/'"$PRIOR_VER"'" 2>/dev/null | wc -l)"'
 fi
 
+# Nested mounts under the site dirs get their own :ro bind (jail.sh section 2), because
+# ro on a parent does not propagate into a filesystem mounted inside it. Asserted by a
+# WRITE, and specifically by the error: "Permission denied" is what the hole looked
+# like before the fix -- /restricted/project was mounted rw inside and only POSIX
+# permissions turned the probe away, so any restricted project the user can write to
+# was writable from the jail. A check that merely required the write to fail would have
+# passed throughout. Only EROFS means the mount is doing the work.
+NESTED_PROBE=""
+if [ "${#SANDBOX_RO_NESTED[@]}" -gt 0 ]; then
+  NESTED_PROBE='
+  _nn=0
+  for _np in '"$(printf '%q ' "${SANDBOX_RO_NESTED[@]}")"'; do
+    if _ne=$(mkdir "$_np/.sbx-ro-probe" 2>&1); then rmdir "$_np/.sbx-ro-probe"; _nn=$((_nn+1))
+    else case "$_ne" in *"Read-only file system"*) ;; *) _nn=$((_nn+1)) ;; esac
+    fi
+  done
+  t nested "$_nn"'
+fi
+
 # Every probe in ONE container instance, so this tests the real composed mount set
 # rather than several different partial ones.
 out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
@@ -151,7 +170,7 @@ out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   # Informational only, and deliberately a no-op submission: -verify makes qsub check
   # and print rather than queue anything. On the pilot this cannot even load its
   # libraries, which is why the CHECKS below assert the mask, not the outcome.
-  t qsubrun "$(qsub -verify -b y /bin/true 2>&1 | tr "\n" " " | cut -c1-60)"'"$BLIND_PROBE$AB_PROBE$EXTRA_PROBE"'
+  t qsubrun "$(qsub -verify -b y /bin/true 2>&1 | tr "\n" " " | cut -c1-60)"'"$BLIND_PROBE$NESTED_PROBE$AB_PROBE$EXTRA_PROBE"'
 ' 2>&1)
 
 g() { sed -n "s/^$1=//p" <<<"$out"; }
@@ -168,6 +187,9 @@ echo "  --- write scope ---"
 # PKG_ROOT default without any case author having confirmed it.
 check "$PKG_ROOT exists inside"           yes      "$(g pkgrootseen)"
 check "$PKG_ROOT is read-only"            ro       "$(g pkgroot)"
+if [ "${#SANDBOX_RO_NESTED[@]}" -gt 0 ]; then
+  check "nested mounts read-only (${#SANDBOX_RO_NESTED[@]}: $(basename "${SANDBOX_RO_NESTED[0]}")…)" 0 "$(g nested)"
+fi
 check "workspace is writable"             rw       "$(g work)"
 
 echo "  --- blinding ---"

@@ -53,6 +53,15 @@ appended *after* the parent or it silently does nothing. Hence the section numbe
 4 workspace → 5 scratch → 6 agent runtime and `SANDBOX_RO_BINDS` → **7 masks, last**.
 Any new bind must be placed by asking whether it should shadow or be shadowed.
 
+**A `:ro` bind does not reach filesystems mounted under it.** Nested mounts keep their
+own flags, so section 2 enumerates them from `/proc/self/mountinfo` and binds each
+`:ro` after its parent. This was live: `/restricted/project` and
+`/restricted/projectnb` were `rw` inside, and the jail could write any restricted
+project the user could. It read as contained because the obvious probe — a write at
+the mount root — fails with `EACCES` on permissions, so the gate must assert `EROFS`
+specifically. Nothing else in the site list has nested mounts *today*; the enumeration
+is per-host and per-run for that reason, and must not be turned back into a list.
+
 Two consequences that are easy to break:
 
 - Each mask gets its **own** directory under `$emptydir` (`_mask` numbers them). A

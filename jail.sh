@@ -53,6 +53,7 @@ SANDBOX_RO_DIRS=(
 # Sets: SANDBOX_ARGS (array)  SANDBOX_BLINDED (0|1)  SANDBOX_ENV (array of VAR=VAL)
 #       SANDBOX_AUTOBOUND (array of instruction dirs discovered in the launch dir)
 #       SANDBOX_HOME_FILES_BOUND (array of files placed in the private home)
+#       SANDBOX_RO_NESTED (array of nested mounts bound :ro under the site dirs)
 #       SANDBOX_BLIND_MASKED / SANDBOX_BLIND_SKIPPED (extra masks applied / not found)
 #       SANDBOX_BATCH_BLOCKED (1 = SGE masked, 0 = SANDBOX_ALLOW_BATCH escape hatch)
 build_sandbox_args() {
@@ -61,6 +62,9 @@ build_sandbox_args() {
   local extra_blind=("$@")
 
   SANDBOX_BLINDED=0
+  # Nested mounts given their own :ro bind in section 2, so the gate can assert that
+  # each one really is read-only inside rather than trusting the parent's flag.
+  SANDBOX_RO_NESTED=()
   SANDBOX_BLIND_SKIPPED=()
 
   # ---- 1. isolate -------------------------------------------------------------
@@ -103,12 +107,42 @@ build_sandbox_args() {
   # has to be hidden must therefore be dropped HERE; appending a mask in section 7
   # looks right, changes nothing, and reports nothing. That is how the SGE spool sat
   # readable while the gate said the mask was configured.
-  local d
+  #
+  # A :ro BIND DOES NOT REACH FILESYSTEMS MOUNTED UNDERNEATH IT. The bind is recursive,
+  # so nested mounts come along -- but each keeps its OWN flags, and ro on the parent
+  # does not propagate. Measured on singularity-ce 4.5.0 with --bind /restricted:ro:
+  #
+  #   /restricted            ro     the bind we asked for
+  #   /restricted/projectnb  rw     separate NFS mount, unchanged
+  #   /restricted/project    rw
+  #
+  # On the SCC /restricted is exactly this shape, so the jail had write access to every
+  # restricted project the user can write to. It LOOKED contained because a write to
+  # the top of those mounts is refused -- by POSIX permissions, "Permission denied",
+  # not by the mount -- which is the inverse of the trap the README warns about under
+  # "Inspecting mounts from inside": there, rw did not mean writable; here, a refusal
+  # did not mean read-only.
+  #
+  # Each nested mount therefore needs its own explicit :ro bind, after its parent.
+  # Enumerated from /proc/self/mountinfo at build time rather than hardcoded: the set
+  # is site- and host-specific, and a list in this file would rot silently. Sorted so
+  # a parent is always bound before a child.
+  #
+  # The workspace, the private $HOME and $TMPDIR are bound in later sections and stay
+  # writable even when they live inside one of these -- which is the point: a run whose
+  # working directory is under /restricted still works, the rest of /restricted does
+  # not become writable to get it.
+  local d sub
   for d in "${SANDBOX_RO_DIRS[@]}"; do
     [ -d "$d" ] || continue
     # The batch spool is the one entry hiding it needs, and only when blocking batch.
     if [ -z "${SANDBOX_ALLOW_BATCH:-}" ] && [ "$d" = /var/spool/sge ]; then continue; fi
     SANDBOX_ARGS+=( --bind "$d:$d:ro" )
+    while IFS= read -r sub; do
+      [ -n "$sub" ] || continue
+      SANDBOX_ARGS+=( --bind "$sub:$sub:ro" )
+      SANDBOX_RO_NESTED+=( "$sub" )
+    done < <(awk -v pfx="$d/" '$5 ~ "^" pfx {print $5}' /proc/self/mountinfo | sort -u)
   done
   [ -f /var/lib/dbus/machine-id ] && \
     SANDBOX_ARGS+=( --bind /var/lib/dbus/machine-id:/var/lib/dbus/machine-id:ro )
