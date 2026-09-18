@@ -268,7 +268,13 @@ build_sandbox_args() {
   # in the corpus) and adds a second code path, to prevent an agent from investigating
   # an empty directory. An empty directory is self-explanatory enough that the trade
   # was not worth the complexity.
-  if [ -d "$pkg_root/$pkg/$ver" ]; then
+  #
+  # pkg and ver are EMPTY when there is no case file -- an isolation-only run, masking
+  # nothing. Test them before the -d, because "$pkg_root//" is itself a directory and
+  # the mask would then swallow the whole package tree: every version of everything
+  # hidden, the gate reporting a successful blind, and nobody able to tell why the
+  # container looks empty.
+  if [ -n "$pkg" ] && [ -n "$ver" ] && [ -d "$pkg_root/$pkg/$ver" ]; then
     _mask "$pkg_root/$pkg/$ver"
     SANDBOX_BLINDED=1
   fi

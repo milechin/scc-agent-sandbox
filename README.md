@@ -154,6 +154,26 @@ BLIND_PATHS=(               # anything else to hide
 Run `./verify-sandbox.sh <case>` after writing one. It catches mistakes — a
 `PRIOR_VER` that does not exist under `PKG_ROOT` fails as unreadable.
 
+### Running without a case
+
+The case file is **optional**. It supplies the blinding target, so without one nothing
+is hidden: you get the isolation — read-only `/share`, a private `$HOME`, one writable
+workspace, the harness masked, batch submission blocked — against a package tree that
+is complete. That is what you want for exercising an agent's behaviour, or the jail
+itself, when no version needs hiding.
+
+```bash
+./verify-sandbox.sh --image /share/singularity/images/files/scc-centos7-2023-06-01.simg
+./run-agent.sh      --image /share/singularity/images/files/scc-centos7-2023-06-01.simg --shell
+```
+
+The image normally comes from the case, so give it with `--image` or `SANDBOX_IMAGE`;
+`--image` also overrides a case, to re-run one against another image without editing
+it. Results land in `results/no-case-<stamp>/`, `run.meta` records
+`case=<none — nothing blinded>`, and the gate prints *no case file — nothing is
+blinded* under its blinding heading rather than leaving the section empty, since an
+empty section reads like a pass.
+
 ## Configuration
 
 All optional, all environment variables.
@@ -164,6 +184,7 @@ All optional, all environment variables.
 | `SANDBOX_RO_BINDS` | extra read-only binds, **one `src:dst` per line** |
 | `SANDBOX_CAPTURE_AT` | only for an agent whose state dir is *not* under `$HOME` |
 | `SANDBOX_VERBOSE=1` | restore Singularity's INFO/WARNING output when diagnosing |
+| `SANDBOX_IMAGE` | the image to use when there is no case file (`--image` wins over both) |
 | `SANDBOX_AUTOBIND_DIRS` | instruction directory names to look for in the launch directory; default `.claude`, empty to disable |
 | `SANDBOX_AUTOBIND_FROM` | look there instead of the current directory |
 | `SANDBOX_HOME_FILES` | individual files **bound** into the private home, **one `src:dst` per line**, `dst` relative to `$HOME`; how an agent gets its credential |

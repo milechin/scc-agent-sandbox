@@ -4,6 +4,13 @@
 #   ./run-agent.sh cases/fftw-3.3.8.env --shell                       # interactive
 #   ./run-agent.sh cases/fftw-3.3.8.env --agent-cmd 'module avail fftw' # scripted
 #   ./run-agent.sh cases/fftw-3.3.8.env --agent-cmd "$MY_AGENT" --out results/run1
+#   ./run-agent.sh --image /path/to.simg --shell                       # NO case file
+#
+# THE CASE FILE IS OPTIONAL. Without one nothing is blinded: you get the isolation --
+# read-only /share, a private $HOME, one writable workspace, the harness masked -- and
+# a package tree that is complete. That is the right shape for exercising an agent's
+# behaviour, or the jail itself, when no version needs hiding. Give --image (or
+# SANDBOX_IMAGE) instead, since the image normally comes from the case.
 #
 # --shell drops you at a prompt INSIDE the verified jail, so you can drive an agent
 # by hand and steer the exercise as it goes. Same mounts, same gate, same blinding
@@ -23,25 +30,36 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=jail.sh
 . "$HERE/jail.sh"
 
-CASE=""; AGENT_CMD=""; OUT=""; WORK=""; SHELL_MODE=0
+CASE=""; AGENT_CMD=""; OUT=""; WORK=""; SHELL_MODE=0; IMAGE_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --agent-cmd) AGENT_CMD=$2; shift 2 ;;
     --shell)     SHELL_MODE=1; shift ;;
     --out)       OUT=$2; shift 2 ;;
     --work)      WORK=$2; shift 2 ;;
-    -h|--help)   sed -n '2,24p' "$0"; exit 0 ;;
+    --image)     IMAGE_ARG=$2; shift 2 ;;
+    -h|--help)   sed -n '2,31p' "$0"; exit 0 ;;
     *)           CASE=$1; shift ;;
   esac
 done
-[ -n "$CASE" ] && [ -f "$CASE" ] || { echo "usage: $0 <case.env> [--shell | --agent-cmd '<cmd>']" >&2; exit 2; }
+[ -z "$CASE" ] || [ -f "$CASE" ] || { echo "no such case file: $CASE" >&2; exit 2; }
 if [ "$SHELL_MODE" = 0 ] && [ -z "$AGENT_CMD" ]; then
   echo "give either --shell (interactive) or --agent-cmd '<cmd>' (scripted)" >&2; exit 2
 fi
-# shellcheck disable=SC1090
-. "$CASE"
+if [ -n "$CASE" ]; then
+  # shellcheck disable=SC1090
+  . "$CASE"
+fi
 
-: "${IMAGE:?case must set IMAGE}" "${PKG:?case must set PKG}" "${VER:?case must set VER}"
+# --image wins over the case, so an existing case can be re-run against another image
+# without editing it. With no case at all it is the only source, apart from the env.
+IMAGE=${IMAGE_ARG:-${IMAGE:-${SANDBOX_IMAGE:-}}}
+[ -n "$IMAGE" ] || {
+  echo "no image: give a case file that sets IMAGE, or --image <file> / SANDBOX_IMAGE" >&2
+  exit 2; }
+# PKG and VER are the blinding target and only exist with a case. Empty means an
+# isolation-only run -- jail.sh masks nothing and the gate skips its blinding checks.
+PKG=${PKG:-}; VER=${VER:-}
 PKG_ROOT=${PKG_ROOT:-/share/pkg.8}
 BLIND_PATHS=("${BLIND_PATHS[@]:-}")
 
@@ -55,7 +73,7 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 # when $OUT is underneath it -- so a run directory in the clone is restored, and one
 # outside is never masked in the first place. The workspace is bound explicitly in
 # both cases, so a cwd outside the site bind list still works.
-OUT=${OUT:-$PWD/results/$(basename "$CASE" .env)-$STAMP}
+OUT=${OUT:-$PWD/results/$([ -n "$CASE" ] && basename "$CASE" .env || echo no-case)-$STAMP}
 WORK=${WORK:-$OUT/work}
 mkdir -p "$WORK" "$OUT/workdir" "$OUT/home" "$OUT/homedir" || exit 1
 # Mask source: mode 755 and OUTSIDE the harness tree -- see jail.sh for why.
@@ -90,7 +108,9 @@ done <<< "${SANDBOX_HOME_COPIES:-}"
 
 # GATE FIRST. A run against a broken jail is worse than no run: it can write to
 # production, or read the answer while the report calls it blinded.
-if ! "$HERE/verify-sandbox.sh" "$CASE" >"$OUT/verify.log" 2>&1; then
+if [ -n "$CASE" ]; then GATE_ARGS=( "$CASE" --image "$IMAGE" )
+                 else GATE_ARGS=( --image "$IMAGE" ); fi
+if ! "$HERE/verify-sandbox.sh" "${GATE_ARGS[@]}" >"$OUT/verify.log" 2>&1; then
   echo "REFUSING TO RUN — sandbox verification failed. See $OUT/verify.log" >&2
   tail -20 "$OUT/verify.log" >&2
   exit 1
@@ -118,7 +138,8 @@ if [ "$SANDBOX_BATCH_BLOCKED" = 0 ]; then
 fi
 
 {
-  echo "case=$(basename "$CASE")"; echo "image=$IMAGE"
+  echo "case=$([ -n "$CASE" ] && basename "$CASE" || echo "<none — nothing blinded>")"
+  echo "image=$IMAGE"
   echo "pkg_root=$PKG_ROOT"; echo "pkg=$PKG"; echo "ver=$VER"
   echo "prior_ver=${PRIOR_VER:-}"; echo "blinded=$SANDBOX_BLINDED"
   echo "host=$(hostname)"; echo "nslots=${NSLOTS:-unset}"
@@ -149,7 +170,7 @@ if [ "$SHELL_MODE" = 1 ]; then
 
   ── sandbox shell ──────────────────────────────────────────────────────────────
    image      $(basename "$IMAGE")
-   blinded    $PKG_ROOT/$PKG/$VER $([ "$SANDBOX_BLINDED" = 1 ] && echo "(masked, 0 entries)" || echo "(NOT present — nothing masked)")
+   blinded    $(if [ "$SANDBOX_BLINDED" = 1 ]; then echo "$PKG_ROOT/$PKG/$VER (masked, 0 entries)"; elif [ -z "$CASE" ]; then echo "nothing — no case file, the package tree is complete"; else echo "$PKG_ROOT/$PKG/$VER (NOT present — nothing masked)"; fi)
    workspace  $WORK            <- the only writable path
    state      $OUT/homedir     <- \$HOME inside; anything the agent writes there survives$([ -n "${SANDBOX_CAPTURE_AT:-}" ] && printf '\n   capture    %s <- bound at %s' "$OUT/home" "$SANDBOX_CAPTURE_AT")
    batch      $([ "$SANDBOX_BATCH_BLOCKED" = 1 ] && echo "blocked (SGE_ROOT masked, spool unbound)" || echo "REACHABLE — SANDBOX_ALLOW_BATCH is set; jobs escape the jail")

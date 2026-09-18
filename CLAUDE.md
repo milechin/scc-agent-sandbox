@@ -38,7 +38,13 @@ everything runs from a compute node with `$NSLOTS` set.
 - **`run-agent.sh`** — invokes the gate first and refuses to start if it fails, then
   execs the same jail with either `/bin/bash -l` (`--shell`) or `-lc "$AGENT_CMD"`.
 - **`cases/*.env`** — sourced shell: `IMAGE`, `PKG_ROOT`, `PKG`, `VER`, `PRIOR_VER`,
-  optional `EXPECT_BIN` and `BLIND_PATHS=()`.
+  optional `EXPECT_BIN` and `BLIND_PATHS=()`. **Optional**: both scripts run without
+  one given `--image`/`SANDBOX_IMAGE`, blinding nothing and verifying everything else.
+  When adding a blinding-dependent check, gate it on `$SANDBOX_BLINDED` or `$CASE` —
+  and make the no-case path *say* it blinded nothing. Empty `PKG`/`VER` are a live
+  input now, not an impossible state: `"$pkg_root/$pkg/$ver"` collapses to
+  `"$pkg_root//"`, which exists, so an unguarded `-d` test masks the entire package
+  tree while the gate reports a clean blind.
 
 **Bind order is the entire security model.** Singularity has no `--exclude`; hiding a
 child of a bound parent means binding an empty directory over it, and the mask must be

@@ -2,6 +2,12 @@
 # verify-sandbox.sh — prove the sandbox before trusting any run.
 #
 #   ./verify-sandbox.sh cases/fftw-3.3.8.env
+#   ./verify-sandbox.sh --image /path/to.simg      # no case: isolation only
+#
+# The case file is OPTIONAL and supplies the blinding target. Without one the jail is
+# verified for everything it still promises -- read-only package tree, writable
+# workspace, private $HOME, harness masked, batch blocked -- and the blinding checks
+# are skipped rather than silently passing on a target that does not exist.
 #
 # This gates everything. A jail whose mounts are wrong does not merely produce bad
 # numbers -- it lets an agent write to production while reporting success, or leaves
@@ -15,13 +21,28 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=jail.sh
 . "$HERE/jail.sh"
 
-CASE=${1:-}
-[ -n "$CASE" ] || { echo "usage: $0 <case.env>" >&2; exit 2; }
-[ -f "$CASE" ] || { echo "no such case file: $CASE" >&2; exit 2; }
-# shellcheck disable=SC1090
-. "$CASE"
+CASE=""; IMAGE_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --image)   IMAGE_ARG=$2; shift 2 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    *)         CASE=$1; shift ;;
+  esac
+done
+[ -z "$CASE" ] || [ -f "$CASE" ] || { echo "no such case file: $CASE" >&2; exit 2; }
+if [ -n "$CASE" ]; then
+  # shellcheck disable=SC1090
+  . "$CASE"
+fi
 
-: "${IMAGE:?case must set IMAGE}" "${PKG:?case must set PKG}" "${VER:?case must set VER}"
+IMAGE=${IMAGE_ARG:-${IMAGE:-${SANDBOX_IMAGE:-}}}
+[ -n "$IMAGE" ] || {
+  echo "no image: give a case file that sets IMAGE, or --image <file> / SANDBOX_IMAGE" >&2
+  exit 2; }
+# Empty without a case: nothing to blind, and the checks below are skipped rather than
+# asserting against "$PKG_ROOT//" -- which exists, and would make a mask of the entire
+# package tree look like a successful blind.
+PKG=${PKG:-}; VER=${VER:-}
 PKG_ROOT=${PKG_ROOT:-/share/pkg.8}
 PRIOR_VER=${PRIOR_VER:-}
 BLIND_PATHS=("${BLIND_PATHS[@]:-}")
@@ -54,8 +75,13 @@ check() { # check <label> <expected> <actual>
   else printf '  FAIL  %-46s want=%s got=%s\n' "$1" "$2" "$3"; fail=$((fail+1)); fi
 }
 
-echo "== sandbox verification: $PKG/$VER in $(basename "$IMAGE")"
-echo "   tree=$PKG_ROOT  case=$(basename "$CASE")"
+if [ -n "$CASE" ]; then
+  echo "== sandbox verification: $PKG/$VER in $(basename "$IMAGE")"
+  echo "   tree=$PKG_ROOT  case=$(basename "$CASE")"
+else
+  echo "== sandbox verification: isolation only, in $(basename "$IMAGE")"
+  echo "   tree=$PKG_ROOT  case=<none>  nothing is blinded"
+fi
 
 build_sandbox_args "$IMAGE" "$PKG_ROOT" "$PKG" "$VER" "$WORK" "$OUT" "$EMPTY" \
                    "${BLIND_PATHS[@]}"
@@ -90,18 +116,30 @@ if [ "${#SANDBOX_BLIND_MASKED[@]}" -gt 0 ]; then
   t extras "$_xn"'
 fi
 
+# The blinding probes need a target, so they exist only with a case file. Built here
+# rather than inlined so that a no-case run does not `ls "$PKG_ROOT//"` -- which lists
+# the whole tree -- or `module avail ""`, and then compare the answers to nothing.
+BLIND_PROBE=""
+if [ "$SANDBOX_BLINDED" = 1 ]; then
+  BLIND_PROBE='
+  t blinded "$(ls -A "'"$PKG_ROOT"'/'"$PKG"'/'"$VER"'" 2>/dev/null | wc -l)"
+  t listed "$(module avail '"$PKG"' 2>&1 | grep -c "'"$PKG"'/'"$VER"'\b")"
+  t loaderr "$(module load '"$PKG"'/'"$VER"' 2>&1 | grep -qi "unknown" && echo unknown || echo other)"'
+fi
+if [ -n "$PRIOR_VER" ]; then
+  BLIND_PROBE="$BLIND_PROBE"'
+  t prior "$(ls -A "'"$PKG_ROOT"'/'"$PKG"'/'"$PRIOR_VER"'" 2>/dev/null | wc -l)"'
+fi
+
 # Every probe in ONE container instance, so this tests the real composed mount set
 # rather than several different partial ones.
 out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   t() { printf "%s=%s\n" "$1" "$2"; }
   t os "$( (cat /etc/redhat-release 2>/dev/null || echo unknown) | tr -d "\n" | cut -c1-24)"
+  [ -d "'"$PKG_ROOT"'" ] && t pkgrootseen yes || t pkgrootseen no
   mkdir -p '"$PKG_ROOT"'/.probe 2>/dev/null && { t pkgroot rw; rmdir '"$PKG_ROOT"'/.probe; } || t pkgroot ro
   touch "'"$WORK"'/.probe" 2>/dev/null && { t work rw; rm -f "'"$WORK"'/.probe"; } || t work ro
-  t blinded "$(ls -A "'"$PKG_ROOT"'/'"$PKG"'/'"$VER"'" 2>/dev/null | wc -l)"
-  t prior "$(ls -A "'"$PKG_ROOT"'/'"$PKG"'/'"$PRIOR_VER"'" 2>/dev/null | wc -l)"
   t modulecmd "$(type -t module || echo none)"
-  t listed "$(module avail '"$PKG"' 2>&1 | grep -c "'"$PKG"'/'"$VER"'\b")"
-  t loaderr "$(module load '"$PKG"'/'"$VER"' 2>&1 | grep -qi "unknown" && echo unknown || echo other)"
   t homefs "$(findmnt -no FSTYPE "$HOME" 2>/dev/null || echo unknown)"
   touch "$HOME/.probe" 2>/dev/null && { t homerw rw; rm -f "$HOME/.probe"; } || t homerw ro
   t homecount "$(ls -A "$HOME" 2>/dev/null | wc -l)"
@@ -113,7 +151,7 @@ out=$(env "${SANDBOX_ENV[@]}" "${SANDBOX_ARGS[@]}" /bin/bash -lc '
   # Informational only, and deliberately a no-op submission: -verify makes qsub check
   # and print rather than queue anything. On the pilot this cannot even load its
   # libraries, which is why the CHECKS below assert the mask, not the outcome.
-  t qsubrun "$(qsub -verify -b y /bin/true 2>&1 | tr "\n" " " | cut -c1-60)"'"$AB_PROBE$EXTRA_PROBE"'
+  t qsubrun "$(qsub -verify -b y /bin/true 2>&1 | tr "\n" " " | cut -c1-60)"'"$BLIND_PROBE$AB_PROBE$EXTRA_PROBE"'
 ' 2>&1)
 
 g() { sed -n "s/^$1=//p" <<<"$out"; }
@@ -124,10 +162,19 @@ check "module command available"          function "$(g modulecmd)"
 check "network reachable"                 ok       "$(g dns)"
 
 echo "  --- write scope ---"
+# Existence first. The read-only probe is a failed mkdir, and a mkdir into a path that
+# is not there fails too -- so an absent PKG_ROOT reads as "ro" and passes. That is the
+# shape of check this repo already got burned by twice, and a no-case run takes the
+# PKG_ROOT default without any case author having confirmed it.
+check "$PKG_ROOT exists inside"           yes      "$(g pkgrootseen)"
 check "$PKG_ROOT is read-only"            ro       "$(g pkgroot)"
 check "workspace is writable"             rw       "$(g work)"
 
 echo "  --- blinding ---"
+# Said out loud rather than shown as an empty section. A gate that prints nothing under
+# this heading reads like a pass; a run with no case file blinds nothing, and the report
+# has to say so or it will be quoted as evidence the agent was blinded.
+[ -n "$CASE" ] || echo "  note  no case file — nothing is blinded; the package tree is complete"
 if [ "$SANDBOX_BLINDED" = 1 ]; then
   check "target $PKG/$VER shows 0 entries" 0       "$(g blinded)"
   # Absent, not merely broken. A cached Lmod scan still lists the masked version and
