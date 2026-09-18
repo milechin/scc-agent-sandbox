@@ -25,6 +25,10 @@ cd scc-agent-sandbox
 Use `https://github.com/milechin/scc-agent-sandbox.git` if you have no SSH key on the
 SCC.
 
+The case file names the version to hide. It is optional — drop it and pass `--image`
+for the same jail with nothing blinded; see
+[Running without a case](#running-without-a-case).
+
 `run-agent.sh` runs the gate itself and **refuses to start** if it fails. You land at
 a prompt inside the container, with a banner naming the paths:
 
@@ -174,6 +178,11 @@ it. Results land in `results/no-case-<stamp>/`, `run.meta` records
 blinded* under its blinding heading rather than leaving the section empty, since an
 empty section reads like a pass.
 
+Everything else is unchanged: the agent settings above all still apply, `PKG_ROOT`
+falls back to `/share/pkg.8` for the read-only check (override it in the environment
+for a `pkg.7` image), and `BLIND_PATHS` has no case file to live in — use
+`SANDBOX_BLIND_EXTRA` for any answer surface you still want hidden.
+
 ## Configuration
 
 All optional, all environment variables.
@@ -234,43 +243,6 @@ verified from within the container rather than trusted by construction.
 
 **Where an agent finds its instructions — the automatic version.** Run from a directory
 containing a `.claude/`, and each populated subdirectory of it is mounted read-only at
-### `SANDBOX_BLIND_EXTRA`: the agent's own prior runs are an answer key
-
-`$OUT` defaults to `$PWD/results/<case>-<stamp>/`, so an agent launched from its own
-repository accumulates its history there — and that directory is under `/projectnb`,
-which the site bind list sweeps in read-only. The first run is clean. Every run after
-it can read the last one's `run.meta` and `argv.txt` (both name `VER` and `PRIOR_VER`)
-and `homedir/.claude/**/*.jsonl`, the previous attempt's full transcript. The same goes
-for a second test harness in that repo and its `cases/`.
-
-`jail.sh` masks only *itself*, so nothing in this harness knows those paths. Mask them
-from the launch side, next to the other per-agent settings:
-
-```bash
-export SANDBOX_BLIND_EXTRA="$PWD/results
-$PWD/tests"
-./run-agent.sh /path/to/scc-agent-sandbox/cases/fftw-3.3.8.env --shell \
-    --out /projectnb/dvm-rcs/temp/runs/fftw-3.3.8-$(date +%Y%m%d-%H%M%S)
-```
-
-**`--out` must then live outside the masked tree.** The run directory is bound back
-over a mask only when it sits under this harness (`SANDBOX_SELF_DIR`), so a `$OUT`
-inside `$PWD/results` would be masked along with the rest and the workspace would come
-back read-only. That fails loudly — the gate's "workspace is writable" check flips to
-`ro` and the run refuses to start — but the fix is to put `--out` elsewhere, as above.
-
-Why this is an environment variable and not `BLIND_PATHS` in the case file: a case
-describes a *package* and has to stay reusable against anyone's agent, so one
-particular checkout's path does not belong in it. `BLIND_PATHS` is for answer surfaces
-belonging to the **target** (a notes archive about fftw, a scratch copy of the recipe);
-`SANDBOX_BLIND_EXTRA` is for ones belonging to the **agent**.
-
-A mask whose source does not exist is skipped, since an absent path is legitimate on a
-host that lacks it — but never silently: the gate prints `requested mask absent, NOT
-applied`, `run-agent.sh` warns, and `run.meta` records `blind_masked` and
-`blind_skipped`. The gate also counts entries inside every applied mask, so these are
-verified from within the container rather than trusted by construction.
-
 the matching place under the private `$HOME`:
 
 ```
@@ -339,7 +311,7 @@ They are then found from any cwd, leaving the writable workspace free to work in
 | | |
 |---|---|
 | `/share` and the package tree | read-only — writes return `EROFS` |
-| the target `<pkg>/<ver>` | contents masked; absent from `module avail` |
+| the target `<pkg>/<ver>` | contents masked; absent from `module avail` — **only with a case file**; without one nothing is blinded and the tree is complete |
 | sibling versions | readable, so prior art works |
 | `$HOME` | private per-run directory, writable, isolated from the real one |
 | this harness (`cases/`, `results/`) | masked — the answer key is not readable |
